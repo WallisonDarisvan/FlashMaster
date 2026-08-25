@@ -1,0 +1,6 @@
+{
+  "name": "Electron MXF Audio Leveler Studio",
+  "description": "Aplicativo desktop completo em Electron.js para conversão profissional de vídeo para MXF com probe de faixas de áudio e filtro de nivelamento (+7dB com limiter em -12dB).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

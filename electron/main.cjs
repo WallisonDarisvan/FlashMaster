@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const { autoUpdater } = require('electron-updater');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
@@ -120,6 +121,43 @@ function setupApplicationMenu() {
       label: 'Help',
       submenu: [
         {
+          label: 'Verificar Atualizações...',
+          click: () => {
+            if (!app.isPackaged) {
+              if (mainWindow) {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'info',
+                  title: 'Verificar Atualizações',
+                  message: 'Modo de Desenvolvimento',
+                  detail: 'A checagem e instalação automática de atualizações via GitHub é ativada no aplicativo instalado (.exe).'
+                });
+              }
+              return;
+            }
+            autoUpdater.checkForUpdates().then((result) => {
+              if (!result || !result.updateInfo) {
+                if (mainWindow) {
+                  dialog.showMessageBox(mainWindow, {
+                    type: 'info',
+                    title: 'Flash Master',
+                    message: 'Você já está usando a versão mais recente!'
+                  });
+                }
+              }
+            }).catch((err) => {
+              if (mainWindow) {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'warning',
+                  title: 'Aviso de Atualização',
+                  message: 'Não foi possível verificar atualizações no momento.',
+                  detail: err.message
+                });
+              }
+            });
+          }
+        },
+        { type: 'separator' },
+        {
           label: 'Sobre Flash Master',
           click: () => {
             if (mainWindow) {
@@ -190,10 +228,74 @@ function createWindow() {
 }
 
 // ============================================================================
-// 2. CICLO DE VIDA DO APLICATIVO
+// 2. SISTEMA DE ATUALIZAÇÕES AUTOMÁTICAS (GITHUB RELEASES VIA ELECTRON-UPDATER)
+// ============================================================================
+function setupAutoUpdater() {
+  if (!app.isPackaged) {
+    console.log('[AutoUpdater] Modo de desenvolvimento: ignorando verificação de atualizações.');
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[AutoUpdater] Consultando novas versões no GitHub...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('[AutoUpdater] Nova versão encontrada:', info.version);
+    if (mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Atualização Encontrada',
+        message: `Nova versão (${info.version}) do Flash Master disponível!`,
+        detail: 'O download da atualização foi iniciado automaticamente em segundo plano.'
+      });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[AutoUpdater] Aplicativo já está na versão mais recente.');
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.warn('[AutoUpdater] Erro na verificação:', err.message);
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[AutoUpdater] Nova versão baixada:', info.version);
+    if (mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Reiniciar e Atualizar Agora', 'Depois'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Atualização Pronta',
+        message: `A versão ${info.version} do Flash Master foi baixada com sucesso!`,
+        detail: 'Deseja reiniciar o aplicativo agora para aplicar as melhorias?'
+      }).then((returnValue) => {
+        if (returnValue.response === 0) {
+          autoUpdater.quitAndInstall();
+        }
+      });
+    }
+  });
+
+  // Verifica atualizações 5 segundos após abrir a janela
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.warn('[AutoUpdater] Falha na consulta automática:', err.message);
+    });
+  }, 5000);
+}
+
+// ============================================================================
+// 3. CICLO DE VIDA DO APLICATIVO
 // ============================================================================
 app.whenReady().then(() => {
   createWindow();
+  setupAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

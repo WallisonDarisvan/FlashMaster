@@ -120,7 +120,8 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
           selectedChannels: video.audio_channels,
           videoCodec,
           gainDb,
-          limitDb
+          limitDb,
+          duration: video.duration
         });
 
         unbindProgress();

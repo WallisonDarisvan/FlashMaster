@@ -110,6 +110,7 @@ export interface ElectronAPI {
     pixelFormat?: string;
     gainDb?: number;
     limitDb?: number;
+    duration?: number;
   }) => Promise<{ success: boolean; outputPath: string }>;
   cancelConversion: () => Promise<boolean>;
   onProgress: (callback: (progress: {

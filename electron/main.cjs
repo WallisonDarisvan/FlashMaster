@@ -572,7 +572,7 @@ ipcMain.handle('ffmpeg:convert', async (event, options) => {
     inputPath,
     outputPath,
     selectedAudioIndices = [0],
-    selectedChannels, // Array de { id, streamIndex, channelIndex, selected, sourceChannelId }
+    selectedChannels,
     videoCodec = 'mpeg2video',
     videoBitrate = '50M',
     pixelFormat = 'yuv422p',
@@ -585,113 +585,113 @@ ipcMain.handle('ffmpeg:convert', async (event, options) => {
       return reject(new Error('Arquivo de entrada não existe: ' + inputPath));
     }
 
-    const cmd = ffmpeg(inputPath);
-    currentCommand = cmd;
-
-    const outputOptions = ['-map 0:v:0'];
+    const ffmpegBin = resolvedFfmpegPath || 'ffmpeg';
+    const args = ['-y', '-i', inputPath];
 
     if (selectedChannels && selectedChannels.length > 0) {
-      // Exclui canais desmarcados do arquivo final: filtra apenas os canais ativos
       const activeChannels = selectedChannels.filter(ch => ch.selected);
 
       if (activeChannels.length === 0) {
         return reject(new Error('Nenhum canal de áudio selecionado. Marque ao menos um canal para exportar.'));
       }
 
+      // Constrói o filter_complex como array de strings separadas
       const filterParts = [];
       const outLabels = [];
 
       activeChannels.forEach((ch, idx) => {
         const outLabel = `out_ch_${idx}`;
         outLabels.push(`[${outLabel}]`);
-
-        // Identifica o canal de origem (se foi duplicado/clonado de outro canal)
         const sourceCh = selectedChannels.find(c => c.id === ch.sourceChannelId) || ch;
-
-        // Extrai o canal selecionado/clonado como mono discreto com ganho e limitador
-        const panFilter = `pan=1c|c0=c${sourceCh.channelIndex}`;
-        const levelFilter = `volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0`;
-
-        filterParts.push(`[0:a:${sourceCh.streamIndex}]${panFilter},${levelFilter}[${outLabel}]`);
+        const filterStr = `[0:a:${sourceCh.streamIndex}]pan=1c|c0=c${sourceCh.channelIndex},volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0[${outLabel}]`;
+        filterParts.push(filterStr);
       });
 
-      outputOptions.push(`-filter_complex ${filterParts.join('; ')}`);
+      args.push('-filter_complex', filterParts.join('; '));
+      args.push('-map', '0:v:0');
       outLabels.forEach(lbl => {
-        outputOptions.push(`-map ${lbl}`);
+        args.push('-map', lbl);
       });
-      outputOptions.push('-c:a pcm_s24le');
-      outputOptions.push('-ar 48000');
     } else {
-      // Fallback para mapeamento por trilha inteira
-      selectedAudioIndices.forEach((audioIdx) => {
-        outputOptions.push(`-map 0:a:${audioIdx}`);
+      args.push('-map', '0:v:0');
+      selectedAudioIndices.forEach(audioIdx => {
+        args.push('-map', `0:a:${audioIdx}`);
       });
-      const audioFilterStr = `volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0`;
-      outputOptions.push(`-af ${audioFilterStr}`);
-      outputOptions.push('-c:a pcm_s24le');
-      outputOptions.push('-ar 48000');
+      args.push('-af', `volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0`);
     }
 
+    // Codec de vídeo
     if (videoCodec === 'mpeg2video') {
-      outputOptions.push('-c:v mpeg2video');
-      outputOptions.push(`-b:v ${videoBitrate}`);
-      outputOptions.push(`-pix_fmt ${pixelFormat}`);
-      outputOptions.push('-g 12');
-      outputOptions.push('-bf 2');
-      outputOptions.push('-flags +ildct+ilme');
-      outputOptions.push('-top 1');
+      args.push('-c:v', 'mpeg2video', '-b:v', videoBitrate, '-pix_fmt', pixelFormat, '-g', '12', '-bf', '2', '-flags', '+ildct+ilme', '-top', '1');
     } else if (videoCodec === 'copy') {
-      outputOptions.push('-c:v copy');
+      args.push('-c:v', 'copy');
     } else if (videoCodec === 'dnxhd') {
-      outputOptions.push('-c:v dnxhd');
-      outputOptions.push('-b:v 120M');
-      outputOptions.push('-pix_fmt yuv422p');
+      args.push('-c:v', 'dnxhd', '-b:v', '120M', '-pix_fmt', 'yuv422p');
     }
 
-    outputOptions.push('-f mxf');
+    // Codec de áudio e formato de saída
+    args.push('-c:a', 'pcm_s24le', '-ar', '48000', '-f', 'mxf', outputPath);
 
-    cmd
-      .outputOptions(outputOptions)
-      .output(outputPath)
-      .on('start', (commandLine) => {
-        console.log('[FFmpeg Start]:', commandLine);
-        event.sender.send('ffmpeg:log', `[Comando FFmpeg Inicializado]: ${commandLine}`);
-      })
-      .on('progress', (prog) => {
+    console.log('[FFmpeg] Iniciando conversão com args:', args.join(' '));
+    event.sender.send('ffmpeg:log', `[Comando]: ${ffmpegBin} ${args.join(' ')}`);
+
+    const child = spawn(ffmpegBin, args, { windowsHide: true });
+    currentCommand = child;
+
+    child.stderr.on('data', (data) => {
+      const line = data.toString();
+      event.sender.send('ffmpeg:log', line.trim());
+
+      // Tenta extrair progresso do stderr do FFmpeg
+      const timeMatch = line.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
+      const fpsMatch = line.match(/fps=\s*(\d+\.?\d*)/);
+      const bitrateMatch = line.match(/bitrate=\s*([0-9.]+\s*\w+\/s)/);
+      const sizeMatch = line.match(/size=\s*(\d+kB)/);
+
+      if (timeMatch) {
+        const parts = timeMatch[1].split(':');
+        const seconds = parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+        const totalDuration = options.duration || 1;
+        const percent = Math.min(100, Math.round((seconds / totalDuration) * 100));
         event.sender.send('ffmpeg:progress', {
-          percent: prog.percent ? Math.min(Math.round(prog.percent), 100) : 0,
-          frames: prog.frames || 0,
-          currentFps: prog.currentFps || 0,
-          currentKbps: prog.currentKbps || 0,
-          targetSize: prog.targetSize || 0,
-          timemark: prog.timemark || '00:00:00'
+          percent,
+          frames: 0,
+          currentFps: fpsMatch ? parseFloat(fpsMatch[1]) : 0,
+          currentKbps: 0,
+          targetSize: sizeMatch ? parseInt(sizeMatch[1]) : 0,
+          timemark: timeMatch[1]
         });
-      })
-      .on('stderr', (stderrLine) => {
-        event.sender.send('ffmpeg:log', stderrLine);
-      })
-      .on('error', (err) => {
-        currentCommand = null;
-        console.error('[FFmpeg Error]:', err.message);
-        event.sender.send('ffmpeg:log', `[ERRO CRÍTICO]: ${err.message}`);
-        reject(new Error(err.message));
-      })
-      .on('end', () => {
-        currentCommand = null;
+      }
+    });
+
+    child.on('error', (err) => {
+      currentCommand = null;
+      console.error('[FFmpeg Error]:', err.message);
+      event.sender.send('ffmpeg:log', `[ERRO CRÍTICO]: ${err.message}`);
+      reject(new Error(err.message));
+    });
+
+    child.on('close', (code) => {
+      currentCommand = null;
+      if (code === 0) {
         console.log('[FFmpeg Concluído]:', outputPath);
         event.sender.send('ffmpeg:log', `[SUCESSO]: Arquivo MXF OP-1a gerado com conformidade total em: ${outputPath}`);
-        resolve({
-          success: true,
-          outputPath: outputPath
-        });
-      })
-      .run();
+        resolve({ success: true, outputPath });
+      } else {
+        const errMsg = `FFmpeg encerrou com código ${code}. Verifique os logs do terminal para detalhes.`;
+        event.sender.send('ffmpeg:log', `[ERRO]: ${errMsg}`);
+        reject(new Error(errMsg));
+      }
+    });
   });
 });
 
 ipcMain.handle('ffmpeg:cancel', async () => {
   if (currentCommand) {
-    currentCommand.kill('SIGKILL');
+    // Funciona tanto com ChildProcess (spawn) quanto com fluent-ffmpeg
+    if (typeof currentCommand.kill === 'function') {
+      currentCommand.kill();
+    }
     currentCommand = null;
     return true;
   }

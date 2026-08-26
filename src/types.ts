@@ -15,8 +15,24 @@ export interface AudioStreamInfo {
   peak_db?: number;
 }
 
+export interface AudioChannelInfo {
+  id: string; // Identificador único: "${streamIndex}:${channelIndex}"
+  streamIndex: number;
+  channelIndex: number;
+  channelNumber: number;
+  label: string; // Ex: "Canal 1: Esquerdo (L)"
+  layoutName: string; // Ex: "Esquerdo (L)" ou "Direito (R)"
+  codec_name: string;
+  sample_rate: number;
+  bit_rate?: number;
+  bits_per_sample?: number;
+  selected: boolean;
+  sourceChannelId?: string; // ID do canal de onde este canal puxa o áudio (ex: "0:0" ou "0:1")
+}
+
 export interface VideoMetadata {
   filename: string;
+  filepath?: string;
   filesize: number;
   format_name: string;
   format_long_name: string;
@@ -29,6 +45,7 @@ export interface VideoMetadata {
   aspect_ratio: string;
   pixel_format: string;
   audio_streams: AudioStreamInfo[];
+  audio_channels?: AudioChannelInfo[];
   video_stream_index: number;
   isChromiumCompatible: boolean;
   sampleUrl?: string;
@@ -70,3 +87,47 @@ export interface ElectronCodeFile {
   description: string;
   code: string;
 }
+
+export interface ElectronAPI {
+  isElectron?: boolean;
+  openVideoDialog: () => Promise<{ filePath: string; fileName: string } | null>;
+  selectOutputDialog: (defaultName?: string) => Promise<string | null>;
+  openFolder: (folderPath: string) => Promise<boolean>;
+  probeVideo: (filePath: string) => Promise<VideoMetadata>;
+  getChannelWaveform?: (options: {
+    filePath: string;
+    streamIndex: number;
+    channelIndex: number;
+    numBars?: number;
+  }) => Promise<number[]>;
+  convertVideo: (options: {
+    inputPath: string;
+    outputPath: string;
+    selectedAudioIndices?: number[];
+    selectedChannels?: { id: string; streamIndex: number; channelIndex: number; selected: boolean; sourceChannelId?: string }[];
+    videoCodec?: string;
+    videoBitrate?: string;
+    pixelFormat?: string;
+    gainDb?: number;
+    limitDb?: number;
+  }) => Promise<{ success: boolean; outputPath: string }>;
+  cancelConversion: () => Promise<boolean>;
+  onProgress: (callback: (progress: {
+    percent: number;
+    frames: number;
+    currentFps: number;
+    currentKbps: number;
+    targetSize: number;
+    timemark: string;
+  }) => void) => () => void;
+  onLog: (callback: (logLine: string) => void) => () => void;
+  onToggleLogs?: (callback: () => void) => () => void;
+  onOpenAudioSettings?: (callback: () => void) => () => void;
+}
+
+declare global {
+  interface Window {
+    electronAPI?: ElectronAPI;
+  }
+}
+

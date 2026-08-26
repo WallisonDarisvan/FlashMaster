@@ -1,17 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, CheckCircle, Terminal, Copy, Check, Sparkles, FolderOpen, RefreshCw, Cpu, Layers } from 'lucide-react';
+import { Play, Square, CheckCircle, Terminal, Sparkles, FolderOpen, RefreshCw, Cpu, Layers } from 'lucide-react';
 import { VideoMetadata, ConversionProgress } from '../types';
 
 interface ConversionTerminalProps {
   video: VideoMetadata | null;
   selectedAudioIndices: number[];
+  gainDb?: number;
+  limitDb?: number;
 }
 
 export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
   video,
-  selectedAudioIndices
+  selectedAudioIndices,
+  gainDb = 7,
+  limitDb = -12
 }) => {
-  const [copied, setCopied] = useState(false);
   const [videoCodec, setVideoCodec] = useState<'mpeg2video' | 'copy' | 'dnxhd'>('mpeg2video');
   const [audioCodec, setAudioCodec] = useState<'pcm_s24le' | 'pcm_s16le'>('pcm_s24le');
 
@@ -30,16 +33,18 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<any>(null);
+  const [outputFilePath, setOutputFilePath] = useState<string | null>(null);
+  const [showLogs, setShowLogs] = useState(false);
 
   // Gera o comando FFmpeg exato
   const generateFfmpegCommand = () => {
-    if (!video) return 'ffmpeg -i master_input.mxf -map 0:v:0 -map 0:a:0 -af "volume=7dB,alimiter=limit=-12dB:attack=5:release=50:asc=0" -c:v mpeg2video -b:v 50M -pix_fmt yuv422p -c:a pcm_s24le -ar 48000 -f mxf output.mxf';
+    if (!video) return `ffmpeg -i master_input.mxf -map 0:v:0 -map 0:a:0 -af "volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0" -c:v mpeg2video -b:v 50M -pix_fmt yuv422p -c:a pcm_s24le -ar 48000 -f mxf output.mxf`;
 
-    const inputName = video.filename;
+    const inputName = video.filepath || video.filename;
     const outputName = video.filename.replace(/\.[^/.]+$/, '') + '_broadcast_master.mxf';
 
     const mapArgs = ['-map 0:v:0', ...selectedAudioIndices.map((idx) => `-map 0:a:${idx}`)].join(' ');
-    const filterArg = `-af "volume=7dB,alimiter=limit=-12dB:attack=5:release=50:asc=0"`;
+    const filterArg = `-af "volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0"`;
 
     let vCodecArg = '-c:v mpeg2video -b:v 50M -pix_fmt yuv422p -g 12 -bf 2 -flags +ildct+ilme -top 1';
     if (videoCodec === 'copy') {
@@ -56,19 +61,100 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
 
   const commandString = generateFfmpegCommand();
 
-  const handleCopyCommand = () => {
-    navigator.clipboard.writeText(commandString);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const startConversion = () => {
+  const startConversion = async () => {
     if (!video || selectedAudioIndices.length === 0) return;
 
     const totalDuration = video.duration || 30.0;
     const totalFrames = Math.round(totalDuration * (video.fps || 29.97));
     const outputName = video.filename.replace(/\.[^/.]+$/, '') + '_broadcast_master.mxf';
 
+    // 1. MODO ELECTRON NATIVO (FFmpeg Real no SO)
+    if (window.electronAPI && video.filepath) {
+      try {
+        const savePath = await window.electronAPI.selectOutputDialog(video.filename);
+        if (!savePath) return;
+
+        setOutputFilePath(savePath);
+        setProgress({
+          status: 'converting',
+          percent: 0,
+          currentFrame: 0,
+          totalFrames,
+          fps: 0,
+          speed: '0.0x',
+          currentTime: 0,
+          totalTime: totalDuration,
+          bitrate: '50 Mbps',
+          outputFilename: savePath,
+          logs: [
+            `[${new Date().toLocaleTimeString()}] Inicializando FFmpeg 6.0 nativo no Windows...`,
+            `[${new Date().toLocaleTimeString()}] Arquivo de entrada: "${video.filepath}"`,
+            `[${new Date().toLocaleTimeString()}] Arquivo de saída: "${savePath}"`,
+            `[${new Date().toLocaleTimeString()}] Mapeando vídeo 0:v:0 e ${selectedAudioIndices.length} canais de áudio...`,
+            `[${new Date().toLocaleTimeString()}] Filtro Broadcast ativado: volume=${gainDb}dB,alimiter=limit=${limitDb}dB`
+          ]
+        });
+
+        const unbindProgress = window.electronAPI.onProgress((prog) => {
+          setProgress((prev) => ({
+            ...prev,
+            percent: prog.percent,
+            currentFrame: prog.frames,
+            fps: prog.currentFps,
+            bitrate: `${prog.currentKbps} kbps`,
+            speed: `${(prog.currentFps / (video.fps || 29.97)).toFixed(2)}x`
+          }));
+        });
+
+        const unbindLog = window.electronAPI.onLog((logLine) => {
+          setProgress((prev) => ({
+            ...prev,
+            logs: [...prev.logs.slice(-200), logLine]
+          }));
+        });
+
+        const result = await window.electronAPI.convertVideo({
+          inputPath: video.filepath,
+          outputPath: savePath,
+          selectedAudioIndices,
+          selectedChannels: video.audio_channels,
+          videoCodec,
+          gainDb,
+          limitDb
+        });
+
+        unbindProgress();
+        unbindLog();
+
+        if (result.success) {
+          setProgress((prev) => ({
+            ...prev,
+            status: 'completed',
+            percent: 100,
+            currentFrame: totalFrames,
+            currentTime: totalDuration,
+            logs: [
+              ...prev.logs,
+              `[${new Date().toLocaleTimeString()}] [CONCLUÍDO COM SUCESSO]: MXF OP-1a gerado em "${savePath}".`
+            ]
+          }));
+        }
+        return;
+      } catch (err: any) {
+        setProgress((prev) => ({
+          ...prev,
+          status: 'error',
+          errorMessage: err.message,
+          logs: [
+            ...prev.logs,
+            `[${new Date().toLocaleTimeString()}] [ERRO CRÍTICO]: ${err.message}`
+          ]
+        }));
+        return;
+      }
+    }
+
+    // 2. MODO WEB SIMULADOR (Fallback)
     setProgress({
       status: 'converting',
       percent: 0,
@@ -141,6 +227,9 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
   };
 
   const cancelConversion = () => {
+    if (window.electronAPI?.cancelConversion) {
+      window.electronAPI.cancelConversion();
+    }
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
@@ -163,6 +252,25 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
     };
   }, []);
 
+  // Escuta o menu nativo do Electron: Window -> Ver Logs (Ctrl+L)
+  useEffect(() => {
+    if (window.electronAPI?.onToggleLogs) {
+      const unbind = window.electronAPI.onToggleLogs(() => {
+        setShowLogs((prev) => !prev);
+      });
+      return unbind;
+    }
+  }, []);
+
+  // Fecha o modal ao pressionar ESC
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowLogs(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
@@ -170,26 +278,26 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
   };
 
   return (
-    <div className="bg-[#151719] border border-[#333] rounded-lg p-4 sm:p-5 shadow-lg space-y-4">
+    <div className="bg-[#151719] border border-[#333] rounded-lg p-3 sm:p-3.5 shadow-lg space-y-2.5 shrink-0">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-2 shrink-0">
         <div>
-          <h3 className="text-[10px] uppercase font-bold text-gray-500 tracking-widest flex items-center gap-2">
+          <h3 className="text-[10px] uppercase font-bold text-gray-500 tracking-widest flex items-center gap-1.5">
             <Cpu className="w-3.5 h-3.5 text-blue-400" />
-            FFmpeg Execution & MXF Broadcast Encoder
+            Execução FFmpeg & Encoder MXF
           </h3>
-          <p className="text-[11px] text-gray-400 mt-1">
-            Mapeia o vídeo (0:v:0), as trilhas de áudio marcadas e aplica o filtro de nivelamento.
+          <p className="text-[10px] text-gray-400 mt-0.5">
+            Processa o vídeo e canais selecionados com limiter <code className="text-blue-400 font-mono">+{gainDb}dB/{limitDb}dB</code>.
           </p>
         </div>
 
         {/* MXF Codec Options */}
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase font-mono text-gray-400">Perfil MXF:</span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="text-[10px] uppercase font-mono text-gray-400">Perfil:</span>
           <select
             value={videoCodec}
             onChange={(e) => setVideoCodec(e.target.value as any)}
-            className="bg-[#1A1C1E] border border-[#333] text-xs font-mono text-gray-200 rounded px-2.5 py-1 focus:outline-none focus:border-blue-500"
+            className="bg-[#1A1C1E] border border-[#333] text-[11px] font-mono text-gray-200 rounded px-2 py-1 focus:outline-none focus:border-blue-500"
           >
             <option value="mpeg2video">XDCAM HD422 (MPEG-2 50Mbps 4:2:2)</option>
             <option value="dnxhd">Avid DNxHD (120Mbps 4:2:2)</option>
@@ -198,87 +306,75 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
         </div>
       </div>
 
-      {/* Dynamic Command Line Preview */}
-      <div className="bg-[#1A1C1E] border border-[#333] rounded-md p-3 space-y-2">
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-gray-400 font-mono text-[10px] uppercase tracking-wider flex items-center gap-1.5">
-            <Terminal className="w-3.5 h-3.5 text-blue-400" />
-            Comando FFmpeg Gerado em Tempo Real:
-          </span>
-          <button
-            onClick={handleCopyCommand}
-            className="flex items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 font-mono px-2 py-0.5 rounded bg-[#151719] border border-[#333] hover:border-blue-500/50 transition-colors"
-          >
-            {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-            {copied ? 'COPIADO' : 'COPIAR CLI'}
-          </button>
-        </div>
-
-        <div className="bg-[#0F1112] rounded p-2.5 font-mono text-[11px] text-gray-300 overflow-x-auto select-all leading-relaxed border border-[#2A2D30]">
-          <span className="text-pink-400">ffmpeg</span> <span className="text-gray-400">-y -i</span>{' '}
-          <span className="text-amber-300">"{video?.filename || 'video.mp4'}"</span>{' '}
-          <span className="text-emerald-400">-map 0:v:0</span>{' '}
-          {selectedAudioIndices.map((idx) => (
-            <span key={idx} className="text-blue-400">
-              -map 0:a:{idx}{' '}
-            </span>
-          ))}
-          <span className="text-yellow-300">-af "volume=7dB,alimiter=limit=-12dB:attack=5:release=50:asc=0"</span>{' '}
-          <span className="text-cyan-300">
-            {videoCodec === 'mpeg2video'
-              ? '-c:v mpeg2video -b:v 50M -pix_fmt yuv422p'
-              : videoCodec === 'dnxhd'
-              ? '-c:v dnxhd -b:v 120M -pix_fmt yuv422p'
-              : '-c:v copy'}
-          </span>{' '}
-          <span className="text-purple-300">-c:a {audioCodec} -ar 48000</span>{' '}
-          <span className="text-rose-300">-f mxf</span>{' '}
-          <span className="text-emerald-300">"{video?.filename.replace(/\.[^/.]+$/, '') || 'output'}_converted.mxf"</span>
-        </div>
-      </div>
-
       {/* Conversion Actions */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-        <button
-          onClick={startConversion}
-          disabled={!video || selectedAudioIndices.length === 0 || progress.status === 'converting'}
-          className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-mono font-bold text-xs py-2.5 px-6 rounded shadow flex items-center justify-center gap-2 transition-all active:scale-[0.99]"
-        >
-          {progress.status === 'converting' ? (
-            <>
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              PROCESSANDO E NIVELANDO ÁUDIO (+7dB / -12dB)...
-            </>
-          ) : (
-            <>
-              <Play className="w-3.5 h-3.5 fill-white" />
-              CONVERTER PARA MXF BROADCAST ({selectedAudioIndices.length} CANAIS)
-            </>
-          )}
-        </button>
+      <div className="flex items-center gap-2 shrink-0">
+        {(() => {
+          const activeCount = video?.audio_channels
+            ? video.audio_channels.filter((c) => c.selected).length
+            : selectedAudioIndices.length;
+
+          return (
+            <button
+              onClick={startConversion}
+              disabled={!video || activeCount === 0 || progress.status === 'converting'}
+              className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-mono font-bold text-xs py-2 px-4 rounded shadow flex items-center justify-center gap-2 transition-all active:scale-[0.99]"
+            >
+              {progress.status === 'converting' ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  PROCESSANDO E NIVELANDO ÁUDIO (+{gainDb}dB / {limitDb}dB)...
+                </>
+              ) : !video ? (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  CARREGUE UM VÍDEO PARA CONVERTER
+                </>
+              ) : activeCount === 0 ? (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  SELECIONE AO MENOS 1 CANAL DE ÁUDIO
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  CONVERTER PARA MXF BROADCAST ({activeCount} {activeCount === 1 ? 'CANAL ATIVO' : 'CANAIS ATIVOS'})
+                </>
+              )}
+            </button>
+          );
+        })()}
 
         {progress.status === 'converting' && (
           <button
             onClick={cancelConversion}
-            className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-bold px-4 py-2.5 rounded transition-colors flex items-center justify-center gap-1.5"
+            className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-bold px-3 py-2 rounded transition-colors flex items-center justify-center gap-1 shrink-0"
           >
             <Square className="w-3 h-3 fill-white" /> CANCELAR
+          </button>
+        )}
+
+        {progress.status === 'completed' && outputFilePath && window.electronAPI && (
+          <button
+            onClick={() => window.electronAPI?.openFolder(outputFilePath)}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold px-3 py-2 rounded transition-colors flex items-center justify-center gap-1 shadow shrink-0"
+          >
+            <FolderOpen className="w-3.5 h-3.5" /> ABRIR PASTA
           </button>
         )}
       </div>
 
       {/* Progress Bar & Telemetry */}
       {(progress.status === 'converting' || progress.status === 'completed') && (
-        <div className="bg-[#1A1C1E] border border-blue-900/40 rounded-lg p-4 space-y-3">
-          <div className="flex justify-between items-center text-xs font-mono">
+        <div className="bg-[#1A1C1E] border border-blue-900/40 rounded-lg p-2.5 space-y-1.5 shrink-0">
+          <div className="flex justify-between items-center text-[11px] font-mono">
             <span className="font-semibold text-gray-200">
-              {progress.status === 'completed' ? 'RENDERIZAÇÃO FINALIZADA COM SUCESSO' : 'TRANSCODIFICANDO ÁUDIO E VÍDEO...'}
+              {progress.status === 'completed' ? 'RENDERIZAÇÃO FINALIZADA COM SUCESSO' : 'TRANSCODIFICANDO...'}
             </span>
             <span className="font-bold text-blue-400">{progress.percent}%</span>
           </div>
 
           {/* Progress bar */}
-          <div className="h-2 bg-[#0F1112] rounded-full overflow-hidden">
+          <div className="h-1.5 bg-[#0F1112] rounded-full overflow-hidden">
             <div
               className={`h-full transition-all duration-150 ${
                 progress.status === 'completed'
@@ -290,63 +386,97 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
           </div>
 
           {/* Metrics */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-gray-400 font-mono">
-            <div className="bg-[#151719] p-2 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[10px]">Quadros:</span>
-              <span className="text-white font-bold">
-                {progress.currentFrame} / {progress.totalFrames}
-              </span>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] text-gray-400 font-mono">
+            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
+              <span className="text-gray-500 block text-[9px]">Quadros:</span>
+              <span className="text-white font-bold">{progress.currentFrame}/{progress.totalFrames}</span>
             </div>
-            <div className="bg-[#151719] p-2 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[10px]">Velocidade:</span>
+            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
+              <span className="text-gray-500 block text-[9px]">Velocidade:</span>
               <span className="text-blue-400 font-bold">{progress.fps} FPS ({progress.speed})</span>
             </div>
-            <div className="bg-[#151719] p-2 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[10px]">Tempo Processado:</span>
-              <span className="text-white font-bold">
-                {formatTime(progress.currentTime)} / {formatTime(progress.totalTime)}
-              </span>
+            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
+              <span className="text-gray-500 block text-[9px]">Tempo:</span>
+              <span className="text-white font-bold">{formatTime(progress.currentTime)}/{formatTime(progress.totalTime)}</span>
             </div>
-            <div className="bg-[#151719] p-2 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[10px]">Nivelamento de Áudio:</span>
-              <span className="text-emerald-400 font-bold">+7dB &bull; Max -12dB</span>
+            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
+              <span className="text-gray-500 block text-[9px]">Áudio Filter:</span>
+              <span className="text-emerald-400 font-bold">+7dB &bull; -12dB</span>
             </div>
           </div>
         </div>
       )}
 
-      {/* Terminal Logs Output */}
-      <div className="bg-[#090A0B] border border-[#333] rounded-md overflow-hidden">
-        <div className="bg-[#151719] px-3 py-2 border-b border-[#333] flex items-center justify-between text-xs text-gray-400 font-mono">
-          <span className="flex items-center gap-1.5 text-[10px] uppercase text-gray-400">
-            <Terminal className="w-3.5 h-3.5 text-blue-400" />
-            Terminal de Logs FFmpeg (stdout / stderr)
-          </span>
-          <span className="text-[10px] text-gray-500">fluent-ffmpeg listener</span>
-        </div>
-
+      {/* Modal Overlay do Terminal de Logs (Acionado pelo Menu: Window -> Ver Logs ou Ctrl+L) */}
+      {showLogs && (
         <div
-          ref={terminalEndRef}
-          className="p-3 h-40 overflow-y-auto font-mono text-[11px] space-y-1 bg-[#090A0B] text-gray-300"
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setShowLogs(false)}
         >
-          {progress.logs.map((log, i) => (
-            <div
-              key={i}
-              className={`leading-relaxed break-all ${
-                log.includes('SUCESSO') || log.includes('CONCLUÍDO')
-                  ? 'text-emerald-400 font-semibold'
-                  : log.includes('Inicializando') || log.includes('Mapeando')
-                  ? 'text-blue-400'
-                  : log.includes('ERRO') || log.includes('CANCELADO')
-                  ? 'text-rose-400'
-                  : 'text-gray-400'
-              }`}
-            >
-              {log}
+          <div
+            className="bg-[#151719] border border-[#333] rounded-lg shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="bg-[#1A1C1E] px-4 py-2.5 border-b border-[#333] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-blue-400" />
+                <span className="font-mono font-bold text-xs text-white uppercase tracking-wider">
+                  Terminal de Logs FFmpeg (stdout / stderr)
+                </span>
+                <span className="text-[10px] text-gray-500 font-mono hidden sm:inline">
+                  &bull; Menu Window &gt; Ver Logs (Ctrl+L)
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowLogs(false)}
+                className="text-gray-400 hover:text-white text-xs font-mono px-2 py-1 bg-[#24272B] hover:bg-[#333] rounded transition-colors"
+              >
+                ✕ Fechar (ESC)
+              </button>
             </div>
-          ))}
+
+            {/* Logs Body */}
+            <div
+              ref={terminalEndRef}
+              className="p-3 flex-1 min-h-[250px] max-h-[60vh] overflow-y-auto font-mono text-[11px] space-y-1 bg-[#090A0B] text-gray-300"
+            >
+              {progress.logs.map((log, i) => (
+                <div
+                  key={i}
+                  className={`leading-relaxed break-all ${
+                    log.includes('SUCESSO') || log.includes('CONCLUÍDO')
+                      ? 'text-emerald-400 font-semibold'
+                      : log.includes('Inicializando') || log.includes('Mapeando')
+                      ? 'text-blue-400'
+                      : log.includes('ERRO') || log.includes('CANCELADO')
+                      ? 'text-rose-400'
+                      : 'text-gray-400'
+                  }`}
+                >
+                  {log}
+                </div>
+              ))}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="bg-[#1A1C1E] px-4 py-2 border-t border-[#333] flex items-center justify-between text-[11px] font-mono text-gray-400">
+              <span>Linhas registradas: <strong className="text-white">{progress.logs.length}</strong></span>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(progress.logs.join('\n'));
+                  alert('Logs copiados para a área de transferência!');
+                }}
+                className="text-blue-400 hover:text-blue-300 text-xs px-2.5 py-1 rounded border border-blue-900/50 hover:bg-blue-950/40 transition-colors"
+              >
+                Copiar Logs
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

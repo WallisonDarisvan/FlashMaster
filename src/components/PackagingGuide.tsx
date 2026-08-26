@@ -1,6 +1,5 @@
 import React from 'react';
-import { BookOpen, ShieldCheck, Terminal, Layers, Cpu, CheckCircle2, Download, AlertCircle, Code } from 'lucide-react';
-import { downloadElectronProjectZip } from '../utils/zipExporter';
+import { BookOpen, ShieldCheck, Terminal, Layers, Cpu, CheckCircle2, AlertCircle, Code } from 'lucide-react';
 
 export const PackagingGuide: React.FC = () => {
   return (
@@ -16,14 +15,6 @@ export const PackagingGuide: React.FC = () => {
             Arquitetura de software, isolamento de contexto (IPC), embarque de binários estáticos e empacotamento com electron-builder.
           </p>
         </div>
-
-        <button
-          onClick={downloadElectronProjectZip}
-          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-xs font-mono font-bold shadow transition-all whitespace-nowrap"
-        >
-          <Download className="w-4 h-4" />
-          <span>BAIXAR CÓDIGO (.ZIP)</span>
-        </button>
       </div>
 
       {/* Grid of Sections */}

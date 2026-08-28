@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Volume2, VolumeX, AlertTriangle, CheckCircle, Info, MonitorPlay } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, AlertTriangle, CheckCircle, Info, MonitorPlay, RotateCcw, RotateCw } from 'lucide-react';
 import { VideoMetadata } from '../types';
 import { AudioVuMeter } from './AudioVuMeter';
 
@@ -196,6 +196,31 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
   };
 
+  const seek = (targetTime: number) => {
+    if (!videoRef.current) return;
+    const maxDur = duration || video?.duration || 0;
+    const clamped = Math.max(0, Math.min(maxDur, targetTime));
+    videoRef.current.currentTime = clamped;
+    setCurrentTime(clamped);
+  };
+
+  const skip = (seconds: number) => {
+    if (!videoRef.current) return;
+    seek(videoRef.current.currentTime + seconds);
+  };
+
+  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const ratio = Math.max(0, Math.min(1, clickX / rect.width));
+    const maxDur = duration || video?.duration || 0;
+    if (maxDur > 0 && videoRef.current) {
+      const target = ratio * maxDur;
+      videoRef.current.currentTime = target;
+      setCurrentTime(target);
+    }
+  };
+
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
@@ -291,29 +316,61 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
               {/* Scrubber & Floating Controls Bar */}
               <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-3 pt-6 flex flex-col gap-2">
-                {/* Timeline bar */}
-                <div className="w-full h-1 bg-white/20 rounded-full relative overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 rounded-full"
-                    style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
-                  />
+                {/* Timeline bar (clicável e interativa) */}
+                <div
+                  onClick={handleTimelineClick}
+                  className="w-full py-1.5 cursor-pointer group flex items-center"
+                  title="Clique para definir o ponto de reprodução"
+                >
+                  <div className="w-full h-1 group-hover:h-1.5 bg-white/20 rounded-full relative overflow-hidden transition-all">
+                    <div
+                      className="h-full bg-blue-500 rounded-full"
+                      style={{ width: `${(duration || video.duration || 0) > 0 ? (currentTime / (duration || video.duration || 1)) * 100 : 0}%` }}
+                    />
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between text-white text-xs">
-                  <div className="flex items-center space-x-3">
+                  <div className="flex items-center space-x-2">
+                    {/* Retroceder 5s */}
                     <button
+                      type="button"
+                      onClick={() => skip(-5)}
+                      title="Voltar 5 segundos"
+                      className="w-7 h-7 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white flex items-center justify-center transition-all active:scale-95"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Play/Pause */}
+                    <button
+                      type="button"
                       onClick={togglePlay}
                       className="w-7 h-7 rounded bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-transform active:scale-95 shadow"
                     >
                       {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
                     </button>
+
+                    {/* Avançar 5s */}
                     <button
+                      type="button"
+                      onClick={() => skip(5)}
+                      title="Avançar 5 segundos"
+                      className="w-7 h-7 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white flex items-center justify-center transition-all active:scale-95"
+                    >
+                      <RotateCw className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Mute */}
+                    <button
+                      type="button"
                       onClick={toggleMute}
-                      className="text-gray-400 hover:text-white"
+                      className="text-gray-400 hover:text-white ml-1"
                     >
                       {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                     </button>
-                    <span className="font-mono text-blue-400 text-[11px]">
+
+                    <span className="font-mono text-blue-400 text-[11px] ml-1">
                       {formatTime(currentTime)} / {formatTime(duration || video.duration)}
                     </span>
                   </div>

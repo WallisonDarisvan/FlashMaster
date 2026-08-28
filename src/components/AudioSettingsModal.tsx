@@ -39,8 +39,8 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
   if (!isOpen) return null;
 
   const handleResetToDefault = () => {
-    setLocalGain(7);
-    setLocalLimit(-12);
+    setLocalGain(0);
+    setLocalLimit(0);
   };
 
   const handleConfirmSave = () => {
@@ -48,7 +48,7 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
     onClose();
   };
 
-  const isDefault = localGain === 7 && localLimit === -12;
+  const isDefault = localGain === 0 && localLimit === 0;
 
   return (
     <div
@@ -90,14 +90,14 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
                 <span>Ganho Linear de Áudio:</span>
               </div>
               <span className="bg-emerald-950/60 text-emerald-400 border border-emerald-800/80 px-2 py-0.5 rounded font-bold text-xs">
-                +{localGain.toFixed(1)} dB
+                {localGain >= 0 ? '+' : ''}{localGain.toFixed(1)} dB
               </span>
             </div>
 
             <input
               type="range"
-              min="0"
-              max="18"
+              min="-24"
+              max="24"
               step="0.5"
               value={localGain}
               onChange={(e) => setLocalGain(parseFloat(e.target.value))}
@@ -105,9 +105,9 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
             />
 
             <div className="flex justify-between text-[9px] text-gray-500">
-              <span>0 dB (Sem Ganho)</span>
-              <span className={localGain === 7 ? 'text-emerald-400 font-bold' : ''}>+7.0 dB (Padrão)</span>
-              <span>+18.0 dB (Máximo)</span>
+              <span>-24.0 dB</span>
+              <span className={localGain === 0 ? 'text-emerald-400 font-bold' : ''}>0.0 dB (Padrão)</span>
+              <span>+24.0 dB</span>
             </div>
           </div>
 
@@ -119,14 +119,14 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
                 <span>Teto do Hard Limiter:</span>
               </div>
               <span className="bg-amber-950/60 text-amber-400 border border-amber-800/80 px-2 py-0.5 rounded font-bold text-xs">
-                {localLimit.toFixed(1)} dBFS
+                {localLimit >= 0 ? '+' : ''}{localLimit.toFixed(1)} dBFS
               </span>
             </div>
 
             <input
               type="range"
               min="-24"
-              max="-6"
+              max="24"
               step="0.5"
               value={localLimit}
               onChange={(e) => setLocalLimit(parseFloat(e.target.value))}
@@ -135,8 +135,8 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
 
             <div className="flex justify-between text-[9px] text-gray-500">
               <span>-24.0 dBFS</span>
-              <span className={localLimit === -12 ? 'text-amber-400 font-bold' : ''}>-12.0 dBFS (Padrão)</span>
-              <span>-6.0 dBFS</span>
+              <span className={localLimit === 0 ? 'text-amber-400 font-bold' : ''}>0.0 dBFS (Padrão)</span>
+              <span>+24.0 dBFS</span>
             </div>
           </div>
 
@@ -145,7 +145,7 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
             <div className="flex items-center gap-1.5">
               <div className={`w-1.5 h-1.5 rounded-full ${isDefault ? 'bg-emerald-400' : 'bg-blue-400 animate-pulse'}`}></div>
               <span>
-                {isDefault ? 'Padrão Oficial ativo (+7dB / -12dB)' : 'Padrão personalizado em uso'}
+                {isDefault ? 'Padrão Oficial ativo (0dB / 0dBFS)' : 'Padrão personalizado em uso'}
               </span>
             </div>
 

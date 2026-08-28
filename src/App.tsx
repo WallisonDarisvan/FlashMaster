@@ -12,11 +12,11 @@ export default function App() {
   // Estados de configuração de ganho e limiter com persistência local
   const [gainDb, setGainDb] = useState<number>(() => {
     const saved = localStorage.getItem('padrao_tvb_gain_db');
-    return saved ? parseFloat(saved) : 7;
+    return saved ? parseFloat(saved) : 0;
   });
   const [limitDb, setLimitDb] = useState<number>(() => {
     const saved = localStorage.getItem('padrao_tvb_limit_db');
-    return saved ? parseFloat(saved) : -12;
+    return saved ? parseFloat(saved) : 0;
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
@@ -199,7 +199,7 @@ export default function App() {
             className="text-gray-400 hover:text-blue-400 hover:underline cursor-pointer hidden sm:inline transition-colors"
             title="Clique para alterar o padrão de ganho e limiter (Atalho: Ctrl+, ou Window -> Configurações de Áudio)"
           >
-            Linear Gain +{gainDb}dB &bull; Hard Limiter {limitDb}dBFS ⚙
+            Linear Gain {gainDb >= 0 ? '+' : ''}{gainDb.toFixed(1)}dB &bull; Hard Limiter {limitDb >= 0 ? '+' : ''}{limitDb.toFixed(1)}dBFS ⚙
           </button>
         </div>
         <div className="flex items-center gap-2 shrink-0">

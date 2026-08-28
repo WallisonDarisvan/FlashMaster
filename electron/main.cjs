@@ -135,12 +135,15 @@ function setupApplicationMenu() {
               return;
             }
             autoUpdater.checkForUpdates().then((result) => {
-              if (!result || !result.updateInfo) {
+              const currentVer = app.getVersion();
+              const latestVer = result?.updateInfo?.version;
+              if (!result || !latestVer || latestVer === currentVer) {
                 if (mainWindow) {
                   dialog.showMessageBox(mainWindow, {
                     type: 'info',
                     title: 'Flash Master',
-                    message: 'Você já está usando a versão mais recente!'
+                    message: 'Você já está usando a versão mais recente!',
+                    detail: `Versão atual instalada: ${currentVer}`
                   });
                 }
               }
@@ -576,8 +579,8 @@ ipcMain.handle('ffmpeg:convert', async (event, options) => {
     videoCodec = 'mpeg2video',
     videoBitrate = '50M',
     pixelFormat = 'yuv422p',
-    gainDb = 7,
-    limitDb = -12
+    gainDb = 0,
+    limitDb = 0
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -598,12 +601,13 @@ ipcMain.handle('ffmpeg:convert', async (event, options) => {
       // Constrói o filter_complex como array de strings separadas
       const filterParts = [];
       const outLabels = [];
+      const safeLimitDb = Math.min(0, Number(limitDb) || 0);
 
       activeChannels.forEach((ch, idx) => {
         const outLabel = `out_ch_${idx}`;
         outLabels.push(`[${outLabel}]`);
         const sourceCh = selectedChannels.find(c => c.id === ch.sourceChannelId) || ch;
-        const filterStr = `[0:a:${sourceCh.streamIndex}]pan=1c|c0=c${sourceCh.channelIndex},volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0[${outLabel}]`;
+        const filterStr = `[0:a:${sourceCh.streamIndex}]pan=1c|c0=c${sourceCh.channelIndex},volume=${gainDb}dB,alimiter=limit=${safeLimitDb}dB:attack=5:release=50:asc=0:level=false[${outLabel}]`;
         filterParts.push(filterStr);
       });
 
@@ -613,11 +617,12 @@ ipcMain.handle('ffmpeg:convert', async (event, options) => {
         args.push('-map', lbl);
       });
     } else {
+      const safeLimitDb = Math.min(0, Number(limitDb) || 0);
       args.push('-map', '0:v:0');
       selectedAudioIndices.forEach(audioIdx => {
         args.push('-map', `0:a:${audioIdx}`);
       });
-      args.push('-af', `volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0`);
+      args.push('-af', `volume=${gainDb}dB,alimiter=limit=${safeLimitDb}dB:attack=5:release=50:asc=0:level=false`);
     }
 
     // Codec de vídeo

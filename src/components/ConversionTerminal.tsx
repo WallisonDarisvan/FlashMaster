@@ -12,8 +12,8 @@ interface ConversionTerminalProps {
 export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
   video,
   selectedAudioIndices,
-  gainDb = 7,
-  limitDb = -12
+  gainDb = 0,
+  limitDb = 0
 }) => {
   const [videoCodec, setVideoCodec] = useState<'mpeg2video' | 'copy' | 'dnxhd'>('mpeg2video');
   const [audioCodec, setAudioCodec] = useState<'pcm_s24le' | 'pcm_s16le'>('pcm_s24le');
@@ -402,7 +402,7 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
             </div>
             <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
               <span className="text-gray-500 block text-[9px]">Áudio Filter:</span>
-              <span className="text-emerald-400 font-bold">+7dB &bull; -12dB</span>
+              <span className="text-emerald-400 font-bold">{gainDb >= 0 ? '+' : ''}{gainDb}dB &bull; {limitDb >= 0 ? '+' : ''}{limitDb}dB</span>
             </div>
           </div>
         </div>

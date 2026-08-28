@@ -11,8 +11,8 @@ interface VideoPlayerPreviewProps {
 
 export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   video,
-  gainDb = 7,
-  limitDb = -12
+  gainDb = 0,
+  limitDb = 0
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -72,7 +72,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         // Limitador (limitDb hard limiter ou bypass)
         const limiter = ctx.createDynamicsCompressor();
         if (isCorrected) {
-          limiter.threshold.setValueAtTime(limitDb, ctx.currentTime);
+          limiter.threshold.setValueAtTime(Math.min(0, limitDb), ctx.currentTime);
           limiter.knee.setValueAtTime(0, ctx.currentTime);
           limiter.ratio.setValueAtTime(20, ctx.currentTime);
           limiter.attack.setValueAtTime(0.005, ctx.currentTime);
@@ -122,7 +122,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
     Object.values(limiterNodesRef.current).forEach((limiter: DynamicsCompressorNode) => {
       if (isCorrected) {
-        limiter.threshold.setValueAtTime(limitDb, ctx.currentTime);
+        limiter.threshold.setValueAtTime(Math.min(0, limitDb), ctx.currentTime);
         limiter.knee.setValueAtTime(0, ctx.currentTime);
         limiter.ratio.setValueAtTime(20, ctx.currentTime);
         limiter.attack.setValueAtTime(0.005, ctx.currentTime);
@@ -262,9 +262,9 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                     ? 'bg-blue-600 text-white shadow-sm'
                     : 'text-gray-400 hover:text-gray-200'
                 }`}
-                title={`Ouvir áudio processado no padrão (+${gainDb}dB ganho e corte em ${limitDb}dBFS)`}
+                title={`Ouvir áudio processado no padrão (${gainDb >= 0 ? '+' : ''}${gainDb.toFixed(1)}dB ganho e corte em ${limitDb >= 0 ? '+' : ''}${limitDb.toFixed(1)}dBFS)`}
               >
-                <span>⚡</span> Corrigido (+{gainDb}dB/{limitDb}dB)
+                <span>⚡</span> Corrigido ({gainDb >= 0 ? '+' : ''}${gainDb.toFixed(1)}dB/{limitDb >= 0 ? '+' : ''}${limitDb.toFixed(1)}dB)
               </button>
             </div>
           )}

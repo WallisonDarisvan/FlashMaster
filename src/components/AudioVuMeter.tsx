@@ -15,8 +15,8 @@ export const AudioVuMeter: React.FC<AudioVuMeterProps> = ({
   analysersRef,
   isPlaying,
   audioMode = 'corrected',
-  gainDb = 7,
-  limitDb = -12
+  gainDb = 0,
+  limitDb = 0
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
@@ -170,12 +170,12 @@ export const AudioVuMeter: React.FC<AudioVuMeterProps> = ({
       <div className="flex items-center justify-between text-[8px] font-mono text-gray-500 mb-0.5 px-0.5">
         <span className="text-gray-400 font-semibold tracking-wider flex items-center gap-1.5">
           <span className={`w-1.5 h-1.5 rounded-full ${audioMode === 'corrected' ? 'bg-blue-500 animate-pulse' : 'bg-amber-500'}`}></span>
-          {audioMode === 'corrected' ? `VU METERS • PADRÃO (+${gainDb}dB / ${limitDb}dB)` : 'VU METERS • ÁUDIO ORIGINAL (BRUTO)'}
+          {audioMode === 'corrected' ? `VU METERS • PROCESSADO (${gainDb >= 0 ? '+' : ''}${gainDb}dB / ${limitDb >= 0 ? '+' : ''}${limitDb}dB)` : 'VU METERS • ÁUDIO ORIGINAL (BRUTO)'}
         </span>
         <div className="flex items-center gap-3">
           <span>-40</span>
           <span>-24</span>
-          <span className="text-amber-400 font-bold">{limitDb}dB (LIMITER)</span>
+          <span className="text-amber-400 font-bold">{limitDb >= 0 ? '+' : ''}{limitDb}dB (LIMITER)</span>
           <span className="text-rose-500 font-bold">0dB</span>
         </div>
       </div>

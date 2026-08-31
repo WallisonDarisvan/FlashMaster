@@ -32,7 +32,7 @@ if (resolvedFfprobePath && fs.existsSync(resolvedFfprobePath)) {
   console.warn('[FFprobe] Binário ffprobe não encontrado, tentando comando global...');
 }
 
-app.name = 'Flash Master';
+app.name = 'Flash Master v1.0.2';
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 
 // Previne instâncias simultâneas disputando a pasta de cache do Windows
@@ -188,7 +188,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 720,
     backgroundColor: '#0F1112',
-    title: 'Flash Master',
+    title: 'Flash Master v1.0.2',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -316,8 +316,8 @@ app.on('window-all-closed', () => {
 // ============================================================================
 ipcMain.handle('dialog:open-video', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Selecionar Arquivo de Vídeo Broadcast',
-    properties: ['openFile'],
+    title: 'Selecionar Arquivos de Vídeo Broadcast',
+    properties: ['openFile', 'multiSelections'],
     filters: [
       {
         name: 'Arquivos de Vídeo',
@@ -331,10 +331,15 @@ ipcMain.handle('dialog:open-video', async () => {
     return null;
   }
 
-  const filePath = result.filePaths[0];
+  const files = result.filePaths.map(fp => ({
+    filePath: fp,
+    fileName: path.basename(fp)
+  }));
+
   return {
-    filePath,
-    fileName: path.basename(filePath)
+    filePath: result.filePaths[0],
+    fileName: path.basename(result.filePaths[0]),
+    files: files
   };
 });
 
@@ -356,6 +361,19 @@ ipcMain.handle('dialog:select-output', async (event, defaultName) => {
   }
 
   return result.filePath;
+});
+
+ipcMain.handle('dialog:select-output-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Selecionar Pasta de Destino para os Arquivos MXF (Lote)',
+    properties: ['openDirectory', 'createDirectory']
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
 });
 
 ipcMain.handle('shell:open-folder', async (event, folderPath) => {

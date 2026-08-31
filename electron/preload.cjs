@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Diálogos de Seleção
   openVideoDialog: () => ipcRenderer.invoke('dialog:open-video'),
   selectOutputDialog: (defaultName) => ipcRenderer.invoke('dialog:select-output', defaultName),
+  selectOutputFolderDialog: () => ipcRenderer.invoke('dialog:select-output-folder'),
   openFolder: (folderPath) => ipcRenderer.invoke('shell:open-folder', folderPath),
 
   // Operações de FFmpeg

@@ -1,19 +1,23 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, CheckCircle, Terminal, Sparkles, FolderOpen, RefreshCw, Cpu, Layers } from 'lucide-react';
+import { Play, Square, CheckCircle, Terminal, FolderOpen, RefreshCw, Cpu, Layers } from 'lucide-react';
 import { VideoMetadata, ConversionProgress } from '../types';
 
 interface ConversionTerminalProps {
-  video: VideoMetadata | null;
+  videos: VideoMetadata[];
+  currentVideo: VideoMetadata | null;
   selectedAudioIndices: number[];
   gainDb?: number;
   limitDb?: number;
+  onUpdateVideoRenderStatus?: (filepath: string, status: 'idle' | 'rendering' | 'completed' | 'error') => void;
 }
 
 export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
-  video,
+  videos,
+  currentVideo,
   selectedAudioIndices,
   gainDb = 0,
-  limitDb = 0
+  limitDb = 0,
+  onUpdateVideoRenderStatus
 }) => {
   const [videoCodec, setVideoCodec] = useState<'mpeg2video' | 'copy' | 'dnxhd'>('mpeg2video');
   const [audioCodec, setAudioCodec] = useState<'pcm_s24le' | 'pcm_s16le'>('pcm_s24le');
@@ -28,22 +32,32 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
     currentTime: 0,
     totalTime: 0,
     bitrate: '0 kbps',
-    logs: ['[ENGINE]: FFmpeg 6.0 x64 pronto. Aguardando comando de conversão.']
+    logs: ['[ENGINE]: FFmpeg 6.0 x64 pronto. Aguardando comando de conversão.'],
+    batchIndex: 0,
+    batchTotal: 0
   });
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<any>(null);
+  const cancelRequestedRef = useRef(false);
   const [outputFilePath, setOutputFilePath] = useState<string | null>(null);
   const [showLogs, setShowLogs] = useState(false);
 
-  // Gera o comando FFmpeg exato
+  const batchVideos = videos.filter((v) => v.isBatchChecked !== false);
+
+  // Gera o comando FFmpeg exato de exemplo
   const generateFfmpegCommand = () => {
-    if (!video) return `ffmpeg -i master_input.mxf -map 0:v:0 -map 0:a:0 -af "volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0" -c:v mpeg2video -b:v 50M -pix_fmt yuv422p -c:a pcm_s24le -ar 48000 -f mxf output.mxf`;
+    const targetVideo = currentVideo || batchVideos[0];
+    if (!targetVideo) return `ffmpeg -i master_input.mxf -map 0:v:0 -map 0:a:0 -af "volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0" -c:v mpeg2video -b:v 50M -pix_fmt yuv422p -c:a pcm_s24le -ar 48000 -f mxf output.mxf`;
 
-    const inputName = video.filepath || video.filename;
-    const outputName = video.filename.replace(/\.[^/.]+$/, '') + '_broadcast_master.mxf';
+    const inputName = targetVideo.filepath || targetVideo.filename;
+    const outputName = targetVideo.filename.replace(/\.[^/.]+$/, '') + '_broadcast_master.mxf';
 
-    const mapArgs = ['-map 0:v:0', ...selectedAudioIndices.map((idx) => `-map 0:a:${idx}`)].join(' ');
+    const activeIndices = targetVideo.audio_channels
+      ? targetVideo.audio_streams.map((s) => s.streamIndex)
+      : selectedAudioIndices;
+
+    const mapArgs = ['-map 0:v:0', ...activeIndices.map((idx) => `-map 0:a:${idx}`)].join(' ');
     const filterArg = `-af "volume=${gainDb}dB,alimiter=limit=${limitDb}dB:attack=5:release=50:asc=0"`;
 
     let vCodecArg = '-c:v mpeg2video -b:v 50M -pix_fmt yuv422p -g 12 -bf 2 -flags +ildct+ilme -top 1';
@@ -62,38 +76,36 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
   const commandString = generateFfmpegCommand();
 
   const startConversion = async () => {
-    if (!video || selectedAudioIndices.length === 0) return;
-
-    const totalDuration = video.duration || 30.0;
-    const totalFrames = Math.round(totalDuration * (video.fps || 29.97));
-    const outputName = video.filename.replace(/\.[^/.]+$/, '') + '_broadcast_master.mxf';
+    if (batchVideos.length === 0) return;
+    cancelRequestedRef.current = false;
 
     // 1. MODO ELECTRON NATIVO (FFmpeg Real no SO)
-    if (window.electronAPI && video.filepath) {
+    if (window.electronAPI) {
       try {
-        const savePath = await window.electronAPI.selectOutputDialog(video.filename);
-        if (!savePath) return;
+        let outputFolder = '';
+        let singleSavePath = '';
 
-        setOutputFilePath(savePath);
-        setProgress({
-          status: 'converting',
-          percent: 0,
-          currentFrame: 0,
-          totalFrames,
-          fps: 0,
-          speed: '0.0x',
-          currentTime: 0,
-          totalTime: totalDuration,
-          bitrate: '50 Mbps',
-          outputFilename: savePath,
-          logs: [
-            `[${new Date().toLocaleTimeString()}] Inicializando FFmpeg 6.0 nativo no Windows...`,
-            `[${new Date().toLocaleTimeString()}] Arquivo de entrada: "${video.filepath}"`,
-            `[${new Date().toLocaleTimeString()}] Arquivo de saída: "${savePath}"`,
-            `[${new Date().toLocaleTimeString()}] Mapeando vídeo 0:v:0 e ${selectedAudioIndices.length} canais de áudio...`,
-            `[${new Date().toLocaleTimeString()}] Filtro Broadcast ativado: volume=${gainDb}dB,alimiter=limit=${limitDb}dB`
-          ]
-        });
+        if (batchVideos.length === 1) {
+          // Arquivo único: Diálogo para salvar arquivo com nome customizado
+          const singleVid = batchVideos[0];
+          const chosenPath = await window.electronAPI.selectOutputDialog(singleVid.filename);
+          if (!chosenPath) return;
+          singleSavePath = chosenPath;
+        } else {
+          // Lote de múltiplos arquivos: Diálogo para selecionar pasta de destino
+          if (window.electronAPI.selectOutputFolderDialog) {
+            const folder = await window.electronAPI.selectOutputFolderDialog();
+            if (!folder) return;
+            outputFolder = folder;
+          } else {
+            const chosenPath = await window.electronAPI.selectOutputDialog(batchVideos[0].filename);
+            if (!chosenPath) return;
+            outputFolder = chosenPath.replace(/[\\/][^\\/]+$/, '');
+          }
+        }
+
+        const totalBatch = batchVideos.length;
+        setOutputFilePath(outputFolder || singleSavePath);
 
         const unbindProgress = window.electronAPI.onProgress((prog) => {
           setProgress((prev) => ({
@@ -102,7 +114,7 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
             currentFrame: prog.frames,
             fps: prog.currentFps,
             bitrate: `${prog.currentKbps} kbps`,
-            speed: `${(prog.currentFps / (video.fps || 29.97)).toFixed(2)}x`
+            speed: `${(prog.currentFps / 29.97).toFixed(2)}x`
           }));
         });
 
@@ -113,30 +125,93 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
           }));
         });
 
-        const result = await window.electronAPI.convertVideo({
-          inputPath: video.filepath,
-          outputPath: savePath,
-          selectedAudioIndices,
-          selectedChannels: video.audio_channels,
-          videoCodec,
-          gainDb,
-          limitDb,
-          duration: video.duration
-        });
+        // Itera sobre todos os vídeos marcados do lote
+        for (let i = 0; i < totalBatch; i++) {
+          if (cancelRequestedRef.current) break;
+
+          const currentItem = batchVideos[i];
+          if (!currentItem.filepath) continue;
+
+          onUpdateVideoRenderStatus?.(currentItem.filepath, 'rendering');
+
+          let savePath = singleSavePath;
+          if (!savePath) {
+            const baseName = currentItem.filename.replace(/\.[^/.]+$/, '');
+            const sep = outputFolder.includes('\\') ? '\\' : '/';
+            savePath = `${outputFolder}${sep}${baseName}_broadcast_master.mxf`;
+          }
+
+          const totalDuration = currentItem.duration || 30.0;
+          const totalFrames = Math.round(totalDuration * (currentItem.fps || 29.97));
+
+          setProgress((prev) => ({
+            ...prev,
+            status: 'converting',
+            percent: 0,
+            currentFrame: 0,
+            totalFrames,
+            fps: 0,
+            speed: '0.0x',
+            currentTime: 0,
+            totalTime: totalDuration,
+            bitrate: '50 Mbps',
+            outputFilename: savePath,
+            batchIndex: i + 1,
+            batchTotal: totalBatch,
+            logs: [
+              ...prev.logs,
+              `------------------------------------------------------------`,
+              `[${new Date().toLocaleTimeString()}] INICIANDO ARQUIVO (${i + 1}/${totalBatch}): "${currentItem.filename}"`,
+              `[${new Date().toLocaleTimeString()}] Saída: "${savePath}"`,
+              `[${new Date().toLocaleTimeString()}] Filtro Broadcast: +${gainDb}dB ganho / corte em ${limitDb}dBFS`
+            ]
+          }));
+
+          const activeIndices = currentItem.audio_streams
+            ? currentItem.audio_streams.filter((s) => s.selected).map((s) => s.streamIndex)
+            : [0];
+
+          try {
+            await window.electronAPI.convertVideo({
+              inputPath: currentItem.filepath,
+              outputPath: savePath,
+              selectedAudioIndices: activeIndices,
+              selectedChannels: currentItem.audio_channels,
+              videoCodec,
+              gainDb,
+              limitDb,
+              duration: currentItem.duration
+            });
+
+            onUpdateVideoRenderStatus?.(currentItem.filepath, 'completed');
+
+            setProgress((prev) => ({
+              ...prev,
+              logs: [
+                ...prev.logs,
+                `[${new Date().toLocaleTimeString()}] [CONCLUÍDO]: "${currentItem.filename}" exportado para MXF OP-1a.`
+              ]
+            }));
+          } catch (itemErr: any) {
+            onUpdateVideoRenderStatus?.(currentItem.filepath, 'error');
+            throw itemErr;
+          }
+        }
 
         unbindProgress();
         unbindLog();
 
-        if (result.success) {
+        if (!cancelRequestedRef.current) {
           setProgress((prev) => ({
             ...prev,
             status: 'completed',
             percent: 100,
-            currentFrame: totalFrames,
-            currentTime: totalDuration,
+            batchIndex: totalBatch,
+            batchTotal: totalBatch,
             logs: [
               ...prev.logs,
-              `[${new Date().toLocaleTimeString()}] [CONCLUÍDO COM SUCESSO]: MXF OP-1a gerado em "${savePath}".`
+              `============================================================`,
+              `[${new Date().toLocaleTimeString()}] [SUCESSO TOTAL]: Todos os ${totalBatch} arquivos do lote foram renderizados com êxito!`
             ]
           }));
         }
@@ -148,7 +223,7 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
           errorMessage: err.message,
           logs: [
             ...prev.logs,
-            `[${new Date().toLocaleTimeString()}] [ERRO CRÍTICO]: ${err.message}`
+            `[${new Date().toLocaleTimeString()}] [ERRO CRÍTICO NO LOTE]: ${err.message}`
           ]
         }));
         return;
@@ -156,78 +231,52 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
     }
 
     // 2. MODO WEB SIMULADOR (Fallback)
+    const totalBatch = batchVideos.length;
     setProgress({
       status: 'converting',
       percent: 0,
       currentFrame: 0,
-      totalFrames,
+      totalFrames: 100,
       fps: 0,
       speed: '0.0x',
       currentTime: 0,
-      totalTime: totalDuration,
+      totalTime: 30,
       bitrate: '52.4 Mbps',
-      outputFilename: outputName,
+      batchIndex: 1,
+      batchTotal: totalBatch,
       logs: [
-        `[${new Date().toLocaleTimeString()}] Inicializando processo child_process.spawn("ffmpeg")...`,
-        `[${new Date().toLocaleTimeString()}] Executando: ${commandString}`,
-        `[${new Date().toLocaleTimeString()}] Mapeando stream de vídeo: 0:v:0 -> MXF Video Track 1`,
-        ...selectedAudioIndices.map(
-          (idx, i) =>
-            `[${new Date().toLocaleTimeString()}] Mapeando trilha: 0:a:${idx} -> MXF Audio Track ${i + 1} (-af "volume=7dB,alimiter=limit=-12dB")`
-        ),
-        `[${new Date().toLocaleTimeString()}] Encoder de áudio broadcast ${audioCodec.toUpperCase()} @ 48kHz linear PCM ativado...`
+        `[${new Date().toLocaleTimeString()}] Inicializando renderização em lote (${totalBatch} arquivos)...`,
+        `[${new Date().toLocaleTimeString()}] Executando: ${commandString}`
       ]
     });
 
     let currentPercent = 0;
-    const startTime = Date.now();
-
     intervalRef.current = setInterval(() => {
-      currentPercent += 2.5;
-      const elapsedSec = (Date.now() - startTime) / 1000;
-      const processedTime = Math.min(totalDuration, (currentPercent / 100) * totalDuration);
-      const currentFrames = Math.min(totalFrames, Math.round((currentPercent / 100) * totalFrames));
-      const currentFps = (currentFrames / (elapsedSec || 0.1)).toFixed(1);
-      const speedMult = ((processedTime / (elapsedSec || 0.1))).toFixed(2);
-
+      currentPercent += 4;
       if (currentPercent >= 100) {
         clearInterval(intervalRef.current);
         setProgress((prev) => ({
           ...prev,
           status: 'completed',
           percent: 100,
-          currentFrame: totalFrames,
-          currentTime: totalDuration,
-          fps: Number(currentFps),
-          speed: `${speedMult}x`,
+          batchIndex: totalBatch,
+          batchTotal: totalBatch,
           logs: [
             ...prev.logs,
-            `[${new Date().toLocaleTimeString()}] frame=${totalFrames} fps=${currentFps} q=1.6 size=184320kB time=${totalDuration.toFixed(2)}s bitrate=54210.4kbits/s speed=${speedMult}x`,
-            `[${new Date().toLocaleTimeString()}] [SUCESSO]: Áudio processado com conformidade total (+7dB ganho com teto em -12.0 dBFS).`,
-            `[${new Date().toLocaleTimeString()}] [CONCLUÍDO]: Arquivo MXF OP-1a gerado com êxito: "${outputName}".`
+            `[${new Date().toLocaleTimeString()}] [CONCLUÍDO]: Todos os ${totalBatch} vídeos foram convertidos com sucesso.`
           ]
         }));
       } else {
         setProgress((prev) => ({
           ...prev,
-          percent: Math.min(99, Math.round(currentPercent)),
-          currentFrame: currentFrames,
-          currentTime: processedTime,
-          fps: Number(currentFps),
-          speed: `${speedMult}x`,
-          logs:
-            currentPercent % 10 < 3
-              ? [
-                  ...prev.logs,
-                  `[${new Date().toLocaleTimeString()}] frame=${currentFrames} fps=${currentFps} time=${processedTime.toFixed(1)}s bitrate=52.4Mbps speed=${speedMult}x`
-                ]
-              : prev.logs
+          percent: Math.min(99, Math.round(currentPercent))
         }));
       }
-    }, 120);
+    }, 100);
   };
 
   const cancelConversion = () => {
+    cancelRequestedRef.current = true;
     if (window.electronAPI?.cancelConversion) {
       window.electronAPI.cancelConversion();
     }
@@ -237,7 +286,7 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
     setProgress((prev) => ({
       ...prev,
       status: 'idle',
-      logs: [...prev.logs, `[${new Date().toLocaleTimeString()}] [CANCELADO]: Processo cancelado pelo operador.`]
+      logs: [...prev.logs, `[${new Date().toLocaleTimeString()}] [CANCELADO]: Processo em lote cancelado pelo operador.`]
     }));
   };
 
@@ -288,7 +337,7 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
             Execução FFmpeg & Encoder MXF
           </h3>
           <p className="text-[10px] text-gray-400 mt-0.5">
-            Processa o vídeo e canais selecionados com limiter <code className="text-blue-400 font-mono">+{gainDb}dB/{limitDb}dB</code>.
+            Processa os arquivos marcados com limiter <code className="text-blue-400 font-mono">+{gainDb}dB/{limitDb}dB</code>.
           </p>
         </div>
 
@@ -309,171 +358,147 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
 
       {/* Conversion Actions */}
       <div className="flex items-center gap-2 shrink-0">
-        {(() => {
-          const activeCount = video?.audio_channels
-            ? video.audio_channels.filter((c) => c.selected).length
-            : selectedAudioIndices.length;
-
-          return (
-            <button
-              onClick={startConversion}
-              disabled={!video || activeCount === 0 || progress.status === 'converting'}
-              className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-mono font-bold text-xs py-2 px-4 rounded shadow flex items-center justify-center gap-2 transition-all active:scale-[0.99]"
-            >
-              {progress.status === 'converting' ? (
-                <>
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  PROCESSANDO E NIVELANDO ÁUDIO (+{gainDb}dB / {limitDb}dB)...
-                </>
-              ) : !video ? (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-white" />
-                  CARREGUE UM VÍDEO PARA CONVERTER
-                </>
-              ) : activeCount === 0 ? (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-white" />
-                  SELECIONE AO MENOS 1 CANAL DE ÁUDIO
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-white" />
-                  CONVERTER PARA MXF BROADCAST ({activeCount} {activeCount === 1 ? 'CANAL ATIVO' : 'CANAIS ATIVOS'})
-                </>
-              )}
-            </button>
-          );
-        })()}
+        <button
+          onClick={startConversion}
+          disabled={batchVideos.length === 0 || progress.status === 'converting'}
+          className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-mono font-bold text-xs py-2 px-4 rounded shadow flex items-center justify-center gap-2 transition-all active:scale-[0.99]"
+        >
+          {progress.status === 'converting' ? (
+            <>
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              PROCESSANDO LOTE ({progress.batchIndex || 1}/{progress.batchTotal || batchVideos.length})...
+            </>
+          ) : batchVideos.length === 0 ? (
+            <>
+              <Play className="w-3.5 h-3.5 fill-white" />
+              MARQUE AO MENOS 1 ARQUIVO NA FILA
+            </>
+          ) : batchVideos.length === 1 ? (
+            <>
+              <Play className="w-3.5 h-3.5 fill-white" />
+              CONVERTER ARQUIVO SELECIONADO PARA MXF
+            </>
+          ) : (
+            <>
+              <Play className="w-3.5 h-3.5 fill-white" />
+              RENDERIZAR LOTE ({batchVideos.length} ARQUIVOS MARCADOS)
+            </>
+          )}
+        </button>
 
         {progress.status === 'converting' && (
           <button
             onClick={cancelConversion}
-            className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-bold px-3 py-2 rounded transition-colors flex items-center justify-center gap-1 shrink-0"
+            className="bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs py-2 px-3 rounded shadow flex items-center gap-1.5 transition-all active:scale-[0.99]"
+            title="Cancelar processo de conversão"
           >
-            <Square className="w-3 h-3 fill-white" /> CANCELAR
+            <Square className="w-3 h-3 fill-white" /> Cancelar
           </button>
         )}
 
-        {progress.status === 'completed' && outputFilePath && window.electronAPI && (
-          <button
-            onClick={() => window.electronAPI?.openFolder(outputFilePath)}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold px-3 py-2 rounded transition-colors flex items-center justify-center gap-1 shadow shrink-0"
-          >
-            <FolderOpen className="w-3.5 h-3.5" /> ABRIR PASTA
-          </button>
-        )}
+        <button
+          onClick={() => setShowLogs(true)}
+          className="bg-[#1A1C1E] hover:bg-[#222528] text-gray-300 hover:text-white border border-[#333] font-mono text-xs py-2 px-3 rounded shadow flex items-center gap-1.5 transition-colors"
+          title="Abrir Terminal de Logs FFmpeg (Atalho: Ctrl+L)"
+        >
+          <Terminal className="w-3.5 h-3.5 text-blue-400" /> Logs
+        </button>
       </div>
 
-      {/* Progress Bar & Telemetry */}
-      {(progress.status === 'converting' || progress.status === 'completed') && (
-        <div className="bg-[#1A1C1E] border border-blue-900/40 rounded-lg p-2.5 space-y-1.5 shrink-0">
-          <div className="flex justify-between items-center text-[11px] font-mono">
-            <span className="font-semibold text-gray-200">
-              {progress.status === 'completed' ? 'RENDERIZAÇÃO FINALIZADA COM SUCESSO' : 'TRANSCODIFICANDO...'}
-            </span>
-            <span className="font-bold text-blue-400">{progress.percent}%</span>
+      {/* Progress & Telemetry */}
+      {progress.status !== 'idle' && (
+        <div className="bg-[#1A1C1E] border border-[#2A2D30] rounded p-2.5 space-y-1.5">
+          <div className="flex items-center justify-between text-xs font-mono">
+            <div className="flex items-center gap-2">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  progress.status === 'converting'
+                    ? 'bg-blue-500 animate-pulse'
+                    : progress.status === 'completed'
+                    ? 'bg-emerald-500'
+                    : 'bg-rose-500'
+                }`}
+              />
+              <span className="font-semibold text-white">
+                {progress.status === 'converting'
+                  ? `Renderizando (${progress.batchIndex}/${progress.batchTotal || batchVideos.length})`
+                  : progress.status === 'completed'
+                  ? `Lote Concluído (${progress.batchTotal || batchVideos.length}/${progress.batchTotal || batchVideos.length})`
+                  : 'Falha na Renderização'}
+              </span>
+              {progress.outputFilename && (
+                <span className="text-gray-400 truncate max-w-[200px] text-[10px]">
+                  &bull; {progress.outputFilename.split(/[\\/]/).pop()}
+                </span>
+              )}
+            </div>
+            <span className="text-blue-400 font-bold">{progress.percent}%</span>
           </div>
 
-          {/* Progress bar */}
-          <div className="h-1.5 bg-[#0F1112] rounded-full overflow-hidden">
+          <div className="w-full h-1.5 bg-[#0F1112] rounded-full overflow-hidden">
             <div
-              className={`h-full transition-all duration-150 ${
-                progress.status === 'completed'
-                  ? 'bg-emerald-500'
-                  : 'bg-blue-600'
+              className={`h-full transition-all duration-200 ${
+                progress.status === 'completed' ? 'bg-emerald-500' : 'bg-blue-600'
               }`}
               style={{ width: `${progress.percent}%` }}
             />
           </div>
 
-          {/* Metrics */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] text-gray-400 font-mono">
-            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[9px]">Quadros:</span>
-              <span className="text-white font-bold">{progress.currentFrame}/{progress.totalFrames}</span>
-            </div>
-            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[9px]">Velocidade:</span>
-              <span className="text-blue-400 font-bold">{progress.fps} FPS ({progress.speed})</span>
-            </div>
-            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[9px]">Tempo:</span>
-              <span className="text-white font-bold">{formatTime(progress.currentTime)}/{formatTime(progress.totalTime)}</span>
-            </div>
-            <div className="bg-[#151719] p-1.5 rounded border border-[#2A2D30]">
-              <span className="text-gray-500 block text-[9px]">Áudio Filter:</span>
-              <span className="text-emerald-400 font-bold">{gainDb >= 0 ? '+' : ''}{gainDb}dB &bull; {limitDb >= 0 ? '+' : ''}{limitDb}dB</span>
-            </div>
+          <div className="flex items-center justify-between text-[10px] font-mono text-gray-400 pt-0.5">
+            <span>FPS: <strong className="text-gray-200">{progress.fps}</strong></span>
+            <span>Velocidade: <strong className="text-gray-200">{progress.speed}</strong></span>
+            <span>Tempo: <strong className="text-gray-200">{formatTime(progress.currentTime)} / {formatTime(progress.totalTime)}</strong></span>
+            {outputFilePath && progress.status === 'completed' && window.electronAPI?.openFolder && (
+              <button
+                type="button"
+                onClick={() => window.electronAPI!.openFolder(outputFilePath)}
+                className="text-blue-400 hover:text-blue-300 underline inline-flex items-center gap-1 font-semibold"
+              >
+                <FolderOpen className="w-3 h-3" /> Abrir Pasta
+              </button>
+            )}
           </div>
         </div>
       )}
 
-      {/* Modal Overlay do Terminal de Logs (Acionado pelo Menu: Window -> Ver Logs ou Ctrl+L) */}
+      {/* Terminal Logs Modal */}
       {showLogs && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setShowLogs(false)}
-        >
-          <div
-            className="bg-[#151719] border border-[#333] rounded-lg shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal Header */}
-            <div className="bg-[#1A1C1E] px-4 py-2.5 border-b border-[#333] flex items-center justify-between">
-              <div className="flex items-center gap-2">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#151719] border border-[#333] rounded-lg shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-4 py-3 bg-[#1A1C1E] border-b border-[#333] flex items-center justify-between">
+              <div className="flex items-center space-x-2">
                 <Terminal className="w-4 h-4 text-blue-400" />
-                <span className="font-mono font-bold text-xs text-white uppercase tracking-wider">
-                  Terminal de Logs FFmpeg (stdout / stderr)
-                </span>
-                <span className="text-[10px] text-gray-500 font-mono hidden sm:inline">
-                  &bull; Menu Window &gt; Ver Logs (Ctrl+L)
-                </span>
+                <h3 className="text-xs font-bold text-white font-mono">
+                  TERMINAL DE LOGS FFMPEG EM TEMPO REAL
+                </h3>
               </div>
               <button
-                type="button"
                 onClick={() => setShowLogs(false)}
-                className="text-gray-400 hover:text-white text-xs font-mono px-2 py-1 bg-[#24272B] hover:bg-[#333] rounded transition-colors"
+                className="text-gray-400 hover:text-white text-xs px-2 py-1 bg-[#151719] border border-[#333] rounded font-mono"
               >
-                ✕ Fechar (ESC)
+                Fechar (ESC)
               </button>
             </div>
-
-            {/* Logs Body */}
             <div
               ref={terminalEndRef}
-              className="p-3 flex-1 min-h-[250px] max-h-[60vh] overflow-y-auto font-mono text-[11px] space-y-1 bg-[#090A0B] text-gray-300"
+              className="p-4 font-mono text-[11px] leading-relaxed bg-[#090A0B] text-gray-300 overflow-y-auto flex-1 space-y-1 select-text"
             >
-              {progress.logs.map((log, i) => (
+              {progress.logs.map((line, idx) => (
                 <div
-                  key={i}
-                  className={`leading-relaxed break-all ${
-                    log.includes('SUCESSO') || log.includes('CONCLUÍDO')
-                      ? 'text-emerald-400 font-semibold'
-                      : log.includes('Inicializando') || log.includes('Mapeando')
-                      ? 'text-blue-400'
-                      : log.includes('ERRO') || log.includes('CANCELADO')
-                      ? 'text-rose-400'
+                  key={idx}
+                  className={
+                    line.includes('ERRO') || line.includes('error')
+                      ? 'text-rose-400 font-bold'
+                      : line.includes('SUCESSO') || line.includes('CONCLUÍDO')
+                      ? 'text-emerald-400 font-bold'
+                      : line.includes('INICIANDO')
+                      ? 'text-blue-300 font-semibold'
                       : 'text-gray-400'
-                  }`}
+                  }
                 >
-                  {log}
+                  {line}
                 </div>
               ))}
-            </div>
-
-            {/* Modal Footer */}
-            <div className="bg-[#1A1C1E] px-4 py-2 border-t border-[#333] flex items-center justify-between text-[11px] font-mono text-gray-400">
-              <span>Linhas registradas: <strong className="text-white">{progress.logs.length}</strong></span>
-              <button
-                type="button"
-                onClick={() => {
-                  navigator.clipboard.writeText(progress.logs.join('\n'));
-                  alert('Logs copiados para a área de transferência!');
-                }}
-                className="text-blue-400 hover:text-blue-300 text-xs px-2.5 py-1 rounded border border-blue-900/50 hover:bg-blue-950/40 transition-colors"
-              >
-                Copiar Logs
-              </button>
             </div>
           </div>
         </div>
@@ -481,4 +506,3 @@ export const ConversionTerminal: React.FC<ConversionTerminalProps> = ({
     </div>
   );
 };
-

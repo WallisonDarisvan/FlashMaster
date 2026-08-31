@@ -49,6 +49,9 @@ export interface VideoMetadata {
   video_stream_index: number;
   isChromiumCompatible: boolean;
   sampleUrl?: string;
+  isBatchChecked?: boolean; // Checkbox para renderização em lote
+  isEdited?: boolean; // Tag [EDITADO] exibida à esquerda do nome
+  renderStatus?: 'idle' | 'rendering' | 'completed' | 'error'; // Tags [RENDERIZANDO...] e [RENDERIZADO]
 }
 
 export interface ConversionConfig {
@@ -78,6 +81,8 @@ export interface ConversionProgress {
   logs: string[];
   outputFilename?: string;
   errorMessage?: string;
+  batchIndex?: number;
+  batchTotal?: number;
 }
 
 export interface ElectronCodeFile {
@@ -90,8 +95,9 @@ export interface ElectronCodeFile {
 
 export interface ElectronAPI {
   isElectron?: boolean;
-  openVideoDialog: () => Promise<{ filePath: string; fileName: string } | null>;
+  openVideoDialog: () => Promise<{ filePath: string; fileName: string; files?: { filePath: string; fileName: string }[] } | null>;
   selectOutputDialog: (defaultName?: string) => Promise<string | null>;
+  selectOutputFolderDialog?: () => Promise<string | null>;
   openFolder: (folderPath: string) => Promise<boolean>;
   probeVideo: (filePath: string) => Promise<VideoMetadata>;
   getChannelWaveform?: (options: {

@@ -4,6 +4,7 @@ import { AudioChannelInfo } from '../types';
 import { ChannelWaveform } from './ChannelWaveform';
 
 interface AudioTrackSelectorProps {
+  videoName?: string;
   audioChannels: AudioChannelInfo[];
   onToggleChannel: (channelId: string) => void;
   onSetChannelSource: (channelId: string, sourceChannelId: string) => void;
@@ -15,6 +16,7 @@ interface AudioTrackSelectorProps {
 }
 
 export const AudioTrackSelector: React.FC<AudioTrackSelectorProps> = ({
+  videoName,
   audioChannels,
   onToggleChannel,
   onSetChannelSource,
@@ -35,11 +37,11 @@ export const AudioTrackSelector: React.FC<AudioTrackSelectorProps> = ({
           <div className="flex items-center gap-2">
             <h3 className="text-[10px] uppercase font-bold text-gray-500 tracking-widest flex items-center gap-2">
               <Sliders className="w-3.5 h-3.5 text-blue-400" />
-              Canais Individuais de Áudio ({audioChannels.length} {audioChannels.length === 1 ? 'CANAL' : 'CANAIS'})
+              Canais de Áudio {videoName ? `• ${videoName}` : `(${audioChannels.length} ${audioChannels.length === 1 ? 'CANAL' : 'CANAIS'})`}
             </h3>
             {audioChannels.length > 0 ? (
               <span className="text-[9px] bg-emerald-900/30 text-emerald-400 px-1.5 py-0.2 rounded border border-emerald-800 font-mono font-bold">
-                DISCRETOS
+                {audioChannels.length} {audioChannels.length === 1 ? 'CANAL' : 'CANAIS'}
               </span>
             ) : (
               <span className="text-[9px] bg-[#1A1C1E] text-gray-500 px-1.5 py-0.2 rounded border border-[#333] font-mono">
@@ -49,8 +51,8 @@ export const AudioTrackSelector: React.FC<AudioTrackSelectorProps> = ({
           </div>
           <p className="text-[10px] text-gray-400 mt-0.5">
             {audioChannels.length > 0
-              ? `Configure a fonte e marque os canais a exportar. Você pode clonar qualquer canal usando o seletor "Fonte":`
-              : 'Aguardando carregamento de arquivo para identificar os canais discretos.'}
+              ? `Configure a fonte e marque os canais a exportar para este arquivo:`
+              : 'Clique em um arquivo acima para configurar seus canais discretos.'}
           </p>
         </div>
 

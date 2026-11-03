@@ -15,11 +15,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Operações de FFmpeg
   probeVideo: (filePath) => ipcRenderer.invoke('ffmpeg:probe', filePath),
+  generatePreview: (filePath) => ipcRenderer.invoke('ffmpeg:generate-preview', filePath),
+  cancelPreview: (filePath) => ipcRenderer.invoke('ffmpeg:cancel-preview', filePath),
   getChannelWaveform: (options) => ipcRenderer.invoke('ffmpeg:get-channel-waveform', options),
   convertVideo: (options) => ipcRenderer.invoke('ffmpeg:convert', options),
   cancelConversion: () => ipcRenderer.invoke('ffmpeg:cancel'),
 
   // Listeners de Eventos (Event Streaming)
+  onPreviewCompleted: (callback) => {
+    const subscription = (_event, value) => callback(value);
+    ipcRenderer.on('ffmpeg:preview-completed', subscription);
+    return () => ipcRenderer.removeListener('ffmpeg:preview-completed', subscription);
+  },
   onProgress: (callback) => {
     const subscription = (_event, value) => callback(value);
     ipcRenderer.on('ffmpeg:progress', subscription);

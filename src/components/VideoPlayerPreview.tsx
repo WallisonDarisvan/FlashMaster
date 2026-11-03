@@ -1,5 +1,5 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Volume2, VolumeX, AlertTriangle, CheckCircle, Info, MonitorPlay, RotateCcw, RotateCw } from 'lucide-react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { Play, Pause, Volume2, VolumeX, AlertTriangle, CheckCircle, Info, MonitorPlay, RotateCcw, RotateCw, RefreshCw, Cpu, StepBack, StepForward } from 'lucide-react';
 import { VideoMetadata } from '../types';
 import { AudioVuMeter } from './AudioVuMeter';
 
@@ -7,12 +7,14 @@ interface VideoPlayerPreviewProps {
   video: VideoMetadata | null;
   gainDb?: number;
   limitDb?: number;
+  onRequestPreview?: (filepath: string) => void;
 }
 
 export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   video,
   gainDb = 0,
-  limitDb = 0
+  limitDb = 0,
+  onRequestPreview
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -42,15 +44,16 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const source = ctx.createMediaElementSource(videoRef.current);
       sourceNodeRef.current = source;
 
-      // Cria splitter e merger para canais discretos
-      const numChannels = Math.max(2, video?.audio_channels?.length || 2);
-      const splitter = ctx.createChannelSplitter(numChannels);
-      const merger = ctx.createChannelMerger(numChannels);
+      // Splitter de 2 canais da fonte stereo MP4
+      const splitter = ctx.createChannelSplitter(2);
+      // Merger estéreo seguro de 2 canais para ligar em ctx.destination (compatível 100% com hardware)
+      const stereoMerger = ctx.createChannelMerger(2);
 
       splitterRef.current = splitter;
-      mergerRef.current = merger;
+      mergerRef.current = stereoMerger;
       source.connect(splitter);
 
+      const numChannels = Math.max(2, video?.audio_channels?.length || 2);
       const gains: { [chIndex: number]: GainNode } = {};
       const processGains: { [chIndex: number]: GainNode } = {};
       const limiters: { [chIndex: number]: DynamicsCompressorNode } = {};
@@ -59,17 +62,14 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const isCorrected = audioMode === 'corrected';
 
       for (let i = 0; i < numChannels; i++) {
-        // Controle de seleção/mudo
         const gainNode = ctx.createGain();
 
-        // Ganho linear (+gainDb ou 1.0)
         const processGain = ctx.createGain();
         processGain.gain.setValueAtTime(
           isCorrected ? Math.pow(10, gainDb / 20) : 1.0,
           ctx.currentTime
         );
 
-        // Limitador (limitDb hard limiter ou bypass)
         const limiter = ctx.createDynamicsCompressor();
         if (isCorrected) {
           limiter.threshold.setValueAtTime(Math.min(0, limitDb), ctx.currentTime);
@@ -82,16 +82,24 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           limiter.ratio.setValueAtTime(1, ctx.currentTime);
         }
 
-        // AnalyserNode para medir modulação broadcast pós-processada
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 256;
         analyser.smoothingTimeConstant = 0.5;
 
-        // Conexão em cascata
+        // Conecta saída do splitter stereo ao canal (Canal 0 -> L, Canal 1 -> R)
+        splitter.connect(gainNode, Math.min(i, 1));
         gainNode.connect(processGain);
         processGain.connect(limiter);
-        limiter.connect(merger, 0, i);
         limiter.connect(analyser);
+
+        // Envia saída processada para o destino estéreo (0 em L, 1 em R)
+        if (i === 0) {
+          limiter.connect(stereoMerger, 0, 0);
+        } else if (i === 1) {
+          limiter.connect(stereoMerger, 0, 1);
+        } else {
+          limiter.connect(stereoMerger, 0, i % 2);
+        }
 
         gains[i] = gainNode;
         processGains[i] = processGain;
@@ -99,13 +107,13 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         analysers[i] = analyser;
       }
 
-      merger.connect(ctx.destination);
+      stereoMerger.connect(ctx.destination);
       gainNodesRef.current = gains;
       processGainNodesRef.current = processGains;
       limiterNodesRef.current = limiters;
       analysersRef.current = analysers;
     } catch (e) {
-      console.warn('[WebAudio] Inicialização do splitter:', e);
+      console.warn('[WebAudio] Grafo inicializado com fallback seguro:', e);
     }
   };
 
@@ -134,52 +142,71 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     });
   }, [audioMode, gainDb, limitDb]);
 
-  // Muta/desmuta e roteia canais (clonagem de áudio) em tempo real
+  // Atualiza ganho/mudo dos canais individuais
   useEffect(() => {
-    if (!video?.audio_channels) return;
-    initAudioGraph();
-
-    if (splitterRef.current && audioContextRef.current) {
-      try {
-        splitterRef.current.disconnect();
-
-        video.audio_channels.forEach((ch) => {
-          const destIdx = ch.channelIndex;
-          const sourceCh = video.audio_channels?.find((c) => c.id === ch.sourceChannelId) || ch;
-          const srcIdx = sourceCh.channelIndex;
-          const gainNode = gainNodesRef.current[destIdx];
-
-          if (gainNode && splitterRef.current) {
-            splitterRef.current.connect(gainNode, srcIdx);
-            gainNode.gain.setValueAtTime(ch.selected ? 1.0 : 0.0, audioContextRef.current!.currentTime);
-          }
-        });
-      } catch (err) {
-        console.warn('[WebAudio] Erro ao reconectar roteamento:', err);
+    if (!video?.audio_channels || !gainNodesRef.current) return;
+    video.audio_channels.forEach((ch) => {
+      const gNode = gainNodesRef.current[ch.channelIndex];
+      if (gNode && audioContextRef.current) {
+        gNode.gain.setValueAtTime(ch.selected ? 1.0 : 0.0, audioContextRef.current.currentTime);
       }
-    }
+    });
   }, [video?.audio_channels]);
 
+  // Reinicia estado de reprodução quando o arquivo mudar, ou preserva posição ao atualizar proxy
+  const prevFilePathRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    setIsPlaying(false);
-    setCurrentTime(0);
-    if (videoRef.current) {
-      videoRef.current.currentTime = 0;
+    const currentId = video?.filepath || video?.filename;
+    if (prevFilePathRef.current !== currentId) {
+      prevFilePathRef.current = currentId;
+      setIsPlaying(false);
+      setCurrentTime(0);
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+      }
+    } else if (videoRef.current && video?.sampleUrl) {
+      // Mesmo arquivo atualizando de preview parcial para completo
+      const curTime = videoRef.current.currentTime;
+      const wasPlaying = !videoRef.current.paused;
+      const onLoaded = () => {
+        if (videoRef.current) {
+          videoRef.current.currentTime = curTime;
+          if (wasPlaying) {
+            videoRef.current.play().catch(() => {});
+          }
+        }
+      };
+      videoRef.current.addEventListener('loadedmetadata', onLoaded, { once: true });
     }
-  }, [video?.filename]);
+  }, [video?.sampleUrl, video?.filename, video?.filepath]);
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     if (!videoRef.current) return;
-    initAudioGraph();
-    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume().catch(() => {});
+
+    try {
+      initAudioGraph();
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+    } catch (e) {
+      console.warn('[WebAudio] AudioContext resume:', e);
     }
 
-    if (isPlaying) {
+    if (isPlaying || !videoRef.current.paused) {
       videoRef.current.pause();
       setIsPlaying(false);
     } else {
-      videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+      try {
+        const maxDur = duration || video?.duration || 0;
+        if (maxDur > 0 && videoRef.current.currentTime >= maxDur - 0.05) {
+          videoRef.current.currentTime = 0;
+          setCurrentTime(0);
+        }
+        await videoRef.current.play();
+        setIsPlaying(true);
+      } catch (err: any) {
+        console.error('[VideoPlayer] Falha ao dar play:', err);
+      }
     }
   };
 
@@ -204,10 +231,60 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     setCurrentTime(clamped);
   };
 
+  // Pula tempo em segundos (+5s / -5s)
   const skip = (seconds: number) => {
     if (!videoRef.current) return;
     seek(videoRef.current.currentTime + seconds);
   };
+
+  // Navega precisamente quadro a quadro (frame a frame)
+  const stepFrame = (frames: number) => {
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+      setIsPlaying(false);
+    }
+    const fps = video?.fps || 29.97;
+    const frameDuration = 1 / fps;
+    const target = videoRef.current.currentTime + frames * frameDuration;
+    seek(target);
+  };
+
+  // Atalhos de teclado estilo Ilha de Edição (Espaço = Play/Pause, Setas = Frame a Frame, J/K/L)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        stepFrame(e.shiftKey ? -30 : -1);
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        stepFrame(e.shiftKey ? 30 : 1);
+      } else if (e.code === 'KeyJ') {
+        e.preventDefault();
+        skip(-5);
+      } else if (e.code === 'KeyK') {
+        e.preventDefault();
+        if (videoRef.current && !videoRef.current.paused) {
+          videoRef.current.pause();
+          setIsPlaying(false);
+        }
+      } else if (e.code === 'KeyL') {
+        e.preventDefault();
+        if (videoRef.current && videoRef.current.paused) {
+          togglePlay();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isPlaying, duration, video?.fps]);
 
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -224,9 +301,14 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
-    const frames = Math.floor((secs % 1) * 30);
+    const fps = video?.fps || 29.97;
+    const frames = Math.floor((secs % 1) * fps);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}`;
   };
+
+  const currentFps = video?.fps || 29.97;
+  const currentFrameNum = Math.floor(currentTime * currentFps);
+  const totalFrames = Math.round((duration || video?.duration || 0) * currentFps);
 
   return (
     <div className="bg-[#151719] border border-[#333] rounded-lg overflow-hidden shadow-lg flex flex-col flex-1 min-h-0">
@@ -271,13 +353,23 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
           {video && (
             <span
-              className={`text-[9px] px-1.5 py-0.5 rounded border ${
-                video.isChromiumCompatible
+              className={`text-[9px] px-1.5 py-0.5 rounded border font-mono ${
+                video.hasPreviewProxy
+                  ? 'bg-cyan-950/40 text-cyan-400 border-cyan-800'
+                  : video.isPartialPreview
+                  ? 'bg-blue-900/40 text-blue-300 border-blue-700 animate-pulse'
+                  : video.isChromiumCompatible
                   ? 'bg-blue-900/30 text-blue-400 border-blue-800'
                   : 'bg-amber-900/30 text-amber-400 border-amber-800'
               }`}
             >
-              {video.isChromiumCompatible ? 'H.264 PREVIEW' : 'FFMPEG MASTER'}
+              {video.hasPreviewProxy
+                ? 'MXF PREVIEW (PROXY)'
+                : video.isPartialPreview
+                ? 'MXF PREVIEW (AO VIVO)'
+                : video.isChromiumCompatible
+                ? 'H.264 PREVIEW'
+                : 'FFMPEG MASTER'}
             </span>
           )}
         </div>
@@ -303,14 +395,21 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         </div>
 
         {video ? (
-          video.isChromiumCompatible && video.sampleUrl ? (
+          video.sampleUrl ? (
             <>
               <video
                 ref={videoRef}
                 src={video.sampleUrl}
+                preload="auto"
                 onTimeUpdate={handleTimeUpdate}
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
                 onEnded={() => setIsPlaying(false)}
-                className="w-full h-full object-contain"
+                onClick={togglePlay}
+                onError={(e) => {
+                  console.error('[VideoPlayer] Erro ao carregar mídia no player:', video.sampleUrl, e);
+                }}
+                className="w-full h-full object-contain cursor-pointer"
                 playsInline
               />
 
@@ -331,7 +430,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between text-white text-xs">
-                  <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-1.5">
                     {/* Retroceder 5s */}
                     <button
                       type="button"
@@ -342,13 +441,34 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                       <RotateCcw className="w-3.5 h-3.5" />
                     </button>
 
+                    {/* Voltar 1 frame */}
+                    <button
+                      type="button"
+                      onClick={() => stepFrame(-1)}
+                      title="Voltar 1 frame / quadro anterior (Seta Esquerda)"
+                      className="w-7 h-7 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white flex items-center justify-center transition-all active:scale-95"
+                    >
+                      <StepBack className="w-3.5 h-3.5" />
+                    </button>
+
                     {/* Play/Pause */}
                     <button
                       type="button"
                       onClick={togglePlay}
-                      className="w-7 h-7 rounded bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-transform active:scale-95 shadow"
+                      title={isPlaying ? "Pausar reprodução (Espaço ou K)" : "Reproduzir vídeo (Espaço ou L)"}
+                      className="w-8 h-8 rounded bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-transform active:scale-95 shadow-lg shadow-blue-900/40"
                     >
-                      {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+                      {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+                    </button>
+
+                    {/* Avançar 1 frame */}
+                    <button
+                      type="button"
+                      onClick={() => stepFrame(1)}
+                      title="Avançar 1 frame / próximo quadro (Seta Direita)"
+                      className="w-7 h-7 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white flex items-center justify-center transition-all active:scale-95"
+                    >
+                      <StepForward className="w-3.5 h-3.5" />
                     </button>
 
                     {/* Avançar 5s */}
@@ -373,6 +493,10 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                     <span className="font-mono text-blue-400 text-[11px] ml-1">
                       {formatTime(currentTime)} / {formatTime(duration || video.duration)}
                     </span>
+
+                    <span className="font-mono text-gray-300 text-[9px] bg-white/10 px-1.5 py-0.5 rounded border border-white/10 hidden sm:inline" title="Número do quadro atual e total">
+                      Q: {currentFrameNum} / {totalFrames}
+                    </span>
                   </div>
                   <span className="text-[10px] font-mono text-gray-400">
                     {video.width}x{video.height} &bull; {video.fps} fps
@@ -380,6 +504,36 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                 </div>
               </div>
             </>
+          ) : video.isPreviewGenerating ? (
+            /* Card com indicador durante a síntese de preview pelo FFmpeg */
+            <div className="p-6 text-center max-w-md space-y-3 font-sans">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-blue-900/30 text-blue-400 border border-blue-700/50 relative mx-auto">
+                <RefreshCw className="w-6 h-6 animate-spin text-blue-400" />
+                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                </span>
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                  Gerando Preview ({video.format_name.toUpperCase()})...
+                </h4>
+                <p className="text-[11px] text-gray-400 mt-1.5 leading-relaxed">
+                  O FFmpeg está gerando um proxy leve em background para reprodução em tempo real de <strong>{video.filename}</strong> no monitor.
+                </p>
+              </div>
+              <div className="bg-[#1A1C1E] border border-[#333] rounded p-2.5 text-left text-[10px] font-mono text-gray-300">
+                <div className="text-blue-400 font-semibold mb-1 flex items-center gap-1">
+                  <Cpu className="w-3 h-3 text-cyan-400 animate-pulse" />
+                  FFmpeg Proxy Engine:
+                </div>
+                <div className="text-gray-400 space-y-0.5">
+                  <div>&gt; Origem: {video.video_codec.toUpperCase()} ({video.width}x{video.height})</div>
+                  <div>&gt; Destino: H.264 / AAC 480p FastDecode (Cache Temp)</div>
+                  <div>&gt; Status: Sintetizando proxy ultrarrápido...</div>
+                </div>
+              </div>
+            </div>
           ) : (
             /* Fallback Card for Chromium non-playable broadcast containers/codecs */
             <div className="p-6 text-center max-w-md space-y-3 font-sans">
@@ -394,6 +548,18 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                   O Chromium não decodifica este codec nativo via GPU no navegador, mas o pipeline do <strong>FFmpeg x64 nativo</strong> o processará e remapeará os canais perfeitamente.
                 </p>
               </div>
+
+              {video.filepath && onRequestPreview && (
+                <button
+                  type="button"
+                  onClick={() => onRequestPreview(video.filepath!)}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white text-xs font-semibold rounded shadow flex items-center gap-1.5 mx-auto transition-all"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Gerar Preview com FFmpeg
+                </button>
+              )}
+
               <div className="bg-[#1A1C1E] border border-[#333] rounded p-2.5 text-left text-[11px] font-mono text-gray-300">
                 <div className="text-blue-400 font-semibold mb-1 flex items-center gap-1">
                   <CheckCircle className="w-3 h-3 text-emerald-400" />

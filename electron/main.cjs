@@ -1,7 +1,9 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const crypto = require('crypto');
+const { spawn, spawnSync } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
@@ -220,6 +222,10 @@ function createWindow() {
     });
   }
 
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    console.log(`[Renderer]: ${message}`);
+  });
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.maximize();
     mainWindow.show();
@@ -308,6 +314,15 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('will-quit', () => {
+  if (typeof activePreviewProcesses !== 'undefined') {
+    for (const [_, proc] of activePreviewProcesses) {
+      try { proc.kill('SIGKILL'); } catch (e) {}
+    }
+    activePreviewProcesses.clear();
   }
 });
 
@@ -459,6 +474,263 @@ ipcMain.handle('ffmpeg:get-channel-waveform', async (event, { filePath, streamIn
 });
 
 // ============================================================================
+// CACHE E PROCESSAMENTO DE PREVIEW PROXY (MXF, MPEG-2, DNxHD -> H.264 MP4)
+// ============================================================================
+const previewCacheDir = path.join(app.getPath('temp'), 'flashmaster_previews');
+try {
+  if (!fs.existsSync(previewCacheDir)) {
+    fs.mkdirSync(previewCacheDir, { recursive: true });
+  }
+} catch (e) {
+  console.warn('[Preview Proxy] Falha ao criar pasta de cache:', e);
+}
+
+function getPreviewPathForFile(filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    const hash = crypto.createHash('md5').update(`v2_${filePath}_${stats.size}_${stats.mtimeMs}`).digest('hex');
+    return path.join(previewCacheDir, `preview_${hash}.mp4`);
+  } catch (err) {
+    const hash = crypto.createHash('md5').update(`v2_${filePath}`).digest('hex');
+    return path.join(previewCacheDir, `preview_${hash}.mp4`);
+  }
+}
+
+let cachedH264Encoder = null;
+
+function getBestH264Encoder() {
+  if (cachedH264Encoder) {
+    return cachedH264Encoder;
+  }
+
+  const ffmpegBin = resolvedFfmpegPath || 'ffmpeg';
+  const candidates = ['h264_nvenc', 'h264_qsv', 'h264_amf'];
+
+  for (const enc of candidates) {
+    try {
+      const probe = spawnSync(ffmpegBin, [
+        '-f', 'lavfi',
+        '-i', 'testsrc=size=320x240:rate=1',
+        '-vframes', '1',
+        '-c:v', enc,
+        '-f', 'null',
+        '-'
+      ], { windowsHide: true, timeout: 3000 });
+
+      if (probe.status === 0) {
+        console.log(`[FFmpeg] Codificador de hardware acelerado detectado: ${enc}`);
+        cachedH264Encoder = enc;
+        return enc;
+      }
+    } catch (e) {
+      // Ignora e testa o próximo
+    }
+  }
+
+  console.log('[FFmpeg] Nenhum codificador GPU detectado, utilizando CPU (libx264)');
+  cachedH264Encoder = 'libx264';
+  return 'libx264';
+}
+
+setTimeout(() => {
+  try { getBestH264Encoder(); } catch (e) {}
+}, 200);
+
+function getEncoderVideoArgs(encoder) {
+  if (encoder === 'h264_nvenc') {
+    return [
+      '-c:v', 'h264_nvenc',
+      '-preset', 'p1',
+      '-tune', 'ull',
+      '-rc', 'vbr',
+      '-cq', '28',
+      '-pix_fmt', 'yuv420p'
+    ];
+  }
+  if (encoder === 'h264_qsv') {
+    return [
+      '-c:v', 'h264_qsv',
+      '-preset', 'veryfast',
+      '-global_quality', '28',
+      '-pix_fmt', 'yuv420p'
+    ];
+  }
+  if (encoder === 'h264_amf') {
+    return [
+      '-c:v', 'h264_amf',
+      '-quality', 'speed',
+      '-rc', 'cqp',
+      '-qp_i', '28',
+      '-qp_p', '28',
+      '-pix_fmt', 'yuv420p'
+    ];
+  }
+  return [
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-tune', 'fastdecode',
+    '-crf', '28',
+    '-pix_fmt', 'yuv420p'
+  ];
+}
+
+function safeAtomicReplace(source, target) {
+  try {
+    if (fs.existsSync(target)) {
+      try { fs.unlinkSync(target); } catch (e) {}
+    }
+    fs.renameSync(source, target);
+    return true;
+  } catch (err) {
+    try {
+      fs.copyFileSync(source, target);
+      try { fs.unlinkSync(source); } catch (e) {}
+      return true;
+    } catch (e2) {
+      console.warn('[Preview Proxy] Erro no atomic replace:', e2);
+      return false;
+    }
+  }
+}
+
+// ============================================================================
+// SERVIDOR LOCAL DE BUFFER CONTÍNUO (STREAMING HTTP FRAGMENTED MP4)
+// Transmite o vídeo em pedaços contínuos (Fragmented MP4) em tempo real
+// ============================================================================
+let streamServerPort = 0;
+const activeStreamProcesses = new Map();
+
+const streamServer = http.createServer((req, res) => {
+  try {
+    const parsedUrl = new URL(req.url, `http://127.0.0.1:${streamServerPort}`);
+    const targetFilePath = parsedUrl.searchParams.get('file');
+    const isMono = parsedUrl.searchParams.get('mono') === '1';
+
+    if (!targetFilePath || !fs.existsSync(targetFilePath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('Arquivo não encontrado');
+    }
+
+    const cachedPreviewPath = getPreviewPathForFile(targetFilePath);
+
+    // 1. Se o arquivo completo já existe no cache, serve diretamente com Byte-Range (Seek / Frame a Frame)
+    if (fs.existsSync(cachedPreviewPath) && fs.statSync(cachedPreviewPath).size > 1024) {
+      const stat = fs.statSync(cachedPreviewPath);
+      const fileSize = stat.size;
+      const range = req.headers.range;
+
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        const chunksize = (end - start) + 1;
+        const fileStream = fs.createReadStream(cachedPreviewPath, { start, end });
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': 'video/mp4'
+        });
+        return fileStream.pipe(res);
+      } else {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': 'video/mp4',
+          'Accept-Ranges': 'bytes'
+        });
+        return fs.createReadStream(cachedPreviewPath).pipe(res);
+      }
+    }
+
+    // 2. Se ainda não foi gerado, inicia STREAMING CONTÍNUO AO VIVO (Fragmented MP4)
+    if (activeStreamProcesses.has(targetFilePath)) {
+      try { activeStreamProcesses.get(targetFilePath).kill('SIGKILL'); } catch (e) {}
+      activeStreamProcesses.delete(targetFilePath);
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'video/mp4',
+      'Connection': 'keep-alive',
+      'Transfer-Encoding': 'chunked'
+    });
+
+    const ffmpegBin = resolvedFfmpegPath || 'ffmpeg';
+    const encoder = getBestH264Encoder();
+    const hwaccel = encoder !== 'libx264' ? ['-hwaccel', 'auto'] : [];
+    const vArgs = getEncoderVideoArgs(encoder);
+
+    const filterComplex = isMono
+      ? '[0:v:0]scale=-2:480,format=yuv420p[vout];[0:a:0][0:a:1]amerge=inputs=2[aout]'
+      : '[0:v:0]scale=-2:480,format=yuv420p[vout]';
+
+    const args = [
+      '-y',
+      ...hwaccel,
+      '-i', targetFilePath,
+      '-filter_complex', filterComplex,
+      '-map', '[vout]',
+      ...(isMono ? ['-map', '[aout]'] : ['-map', '0:a:0?']),
+      ...vArgs,
+      '-g', '15',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ac', '2',
+      '-f', 'mp4',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+      'pipe:1'
+    ];
+
+    console.log(`[StreamServer] Iniciando buffer contínuo com [${encoder}] para:`, targetFilePath);
+    const child = spawn(ffmpegBin, args, { windowsHide: true });
+    activeStreamProcesses.set(targetFilePath, child);
+
+    const tempCacheOutput = cachedPreviewPath + '.temp.mp4';
+    const cacheStream = fs.createWriteStream(tempCacheOutput);
+
+    child.stdout.on('data', (chunk) => {
+      try { res.write(chunk); } catch (e) {}
+      try { cacheStream.write(chunk); } catch (e) {}
+    });
+
+    child.on('close', (code) => {
+      try { res.end(); } catch (e) {}
+      try { cacheStream.end(); } catch (e) {}
+      activeStreamProcesses.delete(targetFilePath);
+      if (code === 0 && fs.existsSync(tempCacheOutput) && fs.statSync(tempCacheOutput).size > 1024) {
+        safeAtomicReplace(tempCacheOutput, cachedPreviewPath);
+        console.log('[StreamServer] Transmissão contínua concluída e gravada em cache:', cachedPreviewPath);
+      }
+    });
+
+    req.on('close', () => {
+      if (activeStreamProcesses.get(targetFilePath) === child) {
+        try { child.kill('SIGKILL'); } catch (e) {}
+        activeStreamProcesses.delete(targetFilePath);
+      }
+      try { cacheStream.end(); } catch (e) {}
+    });
+  } catch (err) {
+    console.error('[StreamServer Error]:', err);
+    try { res.end(); } catch (e) {}
+  }
+});
+
+streamServer.listen(0, '127.0.0.1', () => {
+  streamServerPort = streamServer.address().port;
+  console.log('[StreamServer] Servidor de buffer contínuo ativo na porta:', streamServerPort);
+});
+
+function getStreamUrl(filePath, hasMultipleMono = false) {
+  if (streamServerPort > 0) {
+    const monoParam = hasMultipleMono ? '&mono=1' : '';
+    return `http://127.0.0.1:${streamServerPort}/stream?file=${encodeURIComponent(filePath)}${monoParam}`;
+  }
+  return null;
+}
+
+const activePreviewProcesses = new Map();
+
+// ============================================================================
 // 4. COMUNICAÇÃO IPC: PROBE DE METADADOS (FFPROBE)
 // ============================================================================
 ipcMain.handle('ffmpeg:probe', async (event, filePath) => {
@@ -543,6 +815,24 @@ ipcMain.handle('ffmpeg:probe', async (event, filePath) => {
         ['mp4', 'webm', 'mov'].some(ext => filePath.toLowerCase().endsWith('.' + ext))
       ) : false;
 
+      let sampleUrl = `file://${filePath.replace(/\\/g, '/')}`;
+      let hasPreviewProxy = false;
+
+      // Se não for compatível nativamente pelo Chromium (ex: MXF, MPEG-2), conecta no streaming contínuo
+      if (!isChromiumCompatible) {
+        const cachedPath = getPreviewPathForFile(filePath);
+        if (fs.existsSync(cachedPath) && fs.statSync(cachedPath).size > 1024) {
+          sampleUrl = `file://${cachedPath.replace(/\\/g, '/')}`;
+          hasPreviewProxy = true;
+        } else if (streamServerPort > 0) {
+          const hasMultiMono = Array.isArray(mappedAudio) && mappedAudio.length >= 2 && mappedAudio[0].channels === 1 && mappedAudio[1].channels === 1;
+          sampleUrl = getStreamUrl(filePath, hasMultiMono);
+          hasPreviewProxy = true;
+        } else {
+          sampleUrl = undefined;
+        }
+      }
+
       const duration = parseFloat(metadata.format.duration || (primaryVideo && primaryVideo.duration) || 0);
       let realFilesize = metadata.format.size || 0;
       if (!realFilesize) {
@@ -569,10 +859,107 @@ ipcMain.handle('ffmpeg:probe', async (event, filePath) => {
         audio_streams: mappedAudio,
         audio_channels: mappedChannels,
         isChromiumCompatible,
-        sampleUrl: `file://${filePath.replace(/\\/g, '/')}`
+        hasPreviewProxy,
+        sampleUrl
       });
     });
   });
+});
+
+// ============================================================================
+// ============================================================================
+// 4.1 BUFFER CONTÍNUO INSTANTÂNEO & REMUX DIRETO
+// ============================================================================
+ipcMain.handle('ffmpeg:generate-preview', async (event, options) => {
+  const filePath = typeof options === 'string' ? options : options?.filePath;
+  const audioStreams = typeof options === 'object' ? options?.audioStreams : null;
+  const videoCodec = (typeof options === 'object' && options?.videoCodec ? options.videoCodec : '').toLowerCase();
+  const pixelFormat = (typeof options === 'object' && options?.pixelFormat ? options.pixelFormat : '').toLowerCase();
+
+  if (!filePath || !fs.existsSync(filePath)) {
+    throw new Error('Arquivo não encontrado: ' + filePath);
+  }
+
+  const previewPath = getPreviewPathForFile(filePath);
+  if (fs.existsSync(previewPath) && fs.statSync(previewPath).size > 1024) {
+    return {
+      success: true,
+      previewPath,
+      sampleUrl: `file://${previewPath.replace(/\\/g, '/')}`,
+      isPartial: false
+    };
+  }
+
+  const ffmpegBin = resolvedFfmpegPath || 'ffmpeg';
+  const hasMultipleMono = Array.isArray(audioStreams) && audioStreams.length >= 2 && audioStreams[0].channels === 1 && audioStreams[1].channels === 1;
+
+  // Se o vídeo já for H.264 yuv420p, faz remux direto (< 0.2s)
+  const isDirectRemuxCompatible = (
+    (videoCodec === 'h264' || videoCodec === 'avc1') &&
+    (pixelFormat === 'yuv420p' || pixelFormat === 'yuvj420p')
+  );
+
+  if (isDirectRemuxCompatible) {
+    console.log('[Preview Proxy: Remux] Executando remux instantâneo:', filePath);
+    const tempRemux = previewPath + '.remux.mp4';
+    if (fs.existsSync(tempRemux)) {
+      try { fs.unlinkSync(tempRemux); } catch (e) {}
+    }
+
+    const remuxArgs = [
+      '-y',
+      '-i', filePath,
+      ...(hasMultipleMono ? ['-filter_complex', '[0:a:0][0:a:1]amerge=inputs=2[aout]'] : []),
+      '-map', '0:v:0',
+      '-c:v', 'copy',
+      ...(hasMultipleMono ? ['-map', '[aout]'] : ['-map', '0:a:0?']),
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ac', '2',
+      '-map_metadata', '-1',
+      '-movflags', '+faststart',
+      tempRemux
+    ];
+
+    try {
+      const remuxProc = spawnSync(ffmpegBin, remuxArgs, { windowsHide: true });
+      if (remuxProc.status === 0 && fs.existsSync(tempRemux) && fs.statSync(tempRemux).size > 1024) {
+        safeAtomicReplace(tempRemux, previewPath);
+        return {
+          success: true,
+          previewPath,
+          sampleUrl: `file://${previewPath.replace(/\\/g, '/')}`,
+          isPartial: false
+        };
+      }
+    } catch (e) {}
+  }
+
+  // Para qualquer vídeo broadcast (MXF XDCAM, MPEG-2, DNxHD, etc.), conecta no buffer de streaming contínuo
+  const streamUrl = getStreamUrl(filePath, hasMultipleMono);
+  return {
+    success: true,
+    previewPath,
+    sampleUrl: streamUrl || `file://${previewPath.replace(/\\/g, '/')}`,
+    isPartial: false
+  };
+});
+
+ipcMain.handle('ffmpeg:cancel-preview', async (event, filePath) => {
+  if (filePath) {
+    if (activeStreamProcesses.has(filePath)) {
+      const child = activeStreamProcesses.get(filePath);
+      try { child.kill('SIGKILL'); } catch (e) {}
+      activeStreamProcesses.delete(filePath);
+    }
+    if (activePreviewProcesses.has(filePath)) {
+      const child = activePreviewProcesses.get(filePath);
+      try { child.kill('SIGKILL'); } catch (e) {}
+      activePreviewProcesses.delete(filePath);
+    }
+    return true;
+  }
+  return false;
 });
 
 function evalFps(fpsString) {

@@ -101,6 +101,131 @@ export default function App() {
     };
   }, [currentVideo?.filepath, waveformsCache]);
 
+  // Atualiza proxy quando a esteira inteligente finalizar a síntese completa em background
+  useEffect(() => {
+    if (!window.electronAPI?.onPreviewCompleted) return;
+    const unsubscribe = window.electronAPI.onPreviewCompleted((data) => {
+      setVideos((prev) =>
+        prev.map((v) =>
+          v.filepath === data.filePath
+            ? {
+                ...v,
+                sampleUrl: data.sampleUrl,
+                hasPreviewProxy: true,
+                isPreviewGenerating: false,
+                isPartialPreview: false
+              }
+            : v
+        )
+      );
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Gera proxy de preview rápido em background para arquivos não compatíveis nativamente com Chromium (ex: MXF, MPEG-2, DNxHD)
+  useEffect(() => {
+    if (!currentVideo || !currentVideo.filepath) return;
+
+    // Se já é compatível nativo ou já possui o proxy de preview pronto, não precisa gerar
+    if (currentVideo.isChromiumCompatible || currentVideo.hasPreviewProxy) return;
+
+    if (!window.electronAPI?.generatePreview) return;
+
+    const targetPath = currentVideo.filepath;
+    let isCancelled = false;
+
+    // Sinaliza no monitor que o preview está sendo sintetizado
+    setVideos((prev) =>
+      prev.map((v) =>
+        v.filepath === targetPath ? { ...v, isPreviewGenerating: true } : v
+      )
+    );
+
+    window.electronAPI.generatePreview({
+      filePath: targetPath,
+      audioStreams: currentVideo.audio_streams,
+      videoCodec: currentVideo.video_codec,
+      pixelFormat: currentVideo.pixel_format,
+      duration: currentVideo.duration
+    })
+      .then((res) => {
+        if (!isCancelled && res && res.sampleUrl) {
+          setVideos((prev) =>
+            prev.map((v) =>
+              v.filepath === targetPath
+                ? {
+                    ...v,
+                    sampleUrl: res.sampleUrl,
+                    hasPreviewProxy: !res.isPartial,
+                    isPreviewGenerating: !!res.isPartial,
+                    isPartialPreview: !!res.isPartial
+                  }
+                : v
+            )
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn('[Preview Proxy Error]:', err);
+        if (!isCancelled) {
+          setVideos((prev) =>
+            prev.map((v) =>
+              v.filepath === targetPath
+                ? { ...v, isPreviewGenerating: false }
+                : v
+            )
+          );
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [currentVideo?.filepath, currentVideo?.isChromiumCompatible, currentVideo?.hasPreviewProxy]);
+
+  // Permite solicitar ou retentar a geração de preview manualmente
+  const handleRequestPreview = (filepath: string) => {
+    if (!window.electronAPI?.generatePreview) return;
+    const targetVid = videos.find((v) => v.filepath === filepath);
+    setVideos((prev) =>
+      prev.map((v) =>
+        v.filepath === filepath ? { ...v, isPreviewGenerating: true } : v
+      )
+    );
+    window.electronAPI.generatePreview({
+      filePath: filepath,
+      audioStreams: targetVid?.audio_streams,
+      videoCodec: targetVid?.video_codec,
+      pixelFormat: targetVid?.pixel_format,
+      duration: targetVid?.duration
+    })
+      .then((res) => {
+        if (res && res.sampleUrl) {
+          setVideos((prev) =>
+            prev.map((v) =>
+              v.filepath === filepath
+                ? {
+                    ...v,
+                    sampleUrl: res.sampleUrl,
+                    hasPreviewProxy: !res.isPartial,
+                    isPreviewGenerating: !!res.isPartial,
+                    isPartialPreview: !!res.isPartial
+                  }
+                : v
+            )
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn('[Manual Preview Proxy Error]:', err);
+        setVideos((prev) =>
+          prev.map((v) =>
+            v.filepath === filepath ? { ...v, isPreviewGenerating: false } : v
+          )
+        );
+      });
+  };
+
   const handleSaveSettings = (newGain: number, newLimit: number) => {
     setGainDb(newGain);
     setLimitDb(newLimit);
@@ -108,13 +233,14 @@ export default function App() {
     localStorage.setItem('padrao_tvb_limit_db', newLimit.toString());
   };
 
-  // Adiciona novos vídeos à fila
+  // Adiciona novos vídeos à fila e seleciona automaticamente o primeiro se nenhum estiver ativo
   const handleAddVideos = (newVideos: VideoMetadata[]) => {
     setVideos((prev) => {
       const existingPaths = new Set(prev.map((v) => v.filepath || v.filename));
       const filtered = newVideos.filter((v) => !existingPaths.has(v.filepath || v.filename));
       return [...prev, ...filtered];
     });
+    setSelectedVideoIndex((prevIndex) => (prevIndex === null ? 0 : prevIndex));
   };
 
   // Alterna o checkbox de renderização em lote de um vídeo específico
@@ -293,6 +419,7 @@ export default function App() {
             video={currentVideo}
             gainDb={gainDb}
             limitDb={limitDb}
+            onRequestPreview={handleRequestPreview}
           />
           <ConversionTerminal
             videos={videos}

@@ -49,6 +49,9 @@ export interface VideoMetadata {
   video_stream_index: number;
   isChromiumCompatible: boolean;
   sampleUrl?: string;
+  hasPreviewProxy?: boolean; // Proxy MP4 leve pronto para visualização
+  isPreviewGenerating?: boolean; // Status de geração de proxy em background
+  isPartialPreview?: boolean; // Indica se está reproduzindo o segmento inicial de 30s enquanto o restante renderiza
   isBatchChecked?: boolean; // Checkbox para renderização em lote
   isEdited?: boolean; // Tag [EDITADO] exibida à esquerda do nome
   renderStatus?: 'idle' | 'rendering' | 'completed' | 'error'; // Tags [RENDERIZANDO...] e [RENDERIZADO]
@@ -99,7 +102,15 @@ export interface ElectronAPI {
   selectOutputDialog: (defaultName?: string) => Promise<string | null>;
   selectOutputFolderDialog?: () => Promise<string | null>;
   openFolder: (folderPath: string) => Promise<boolean>;
-  probeVideo: (filePath: string) => Promise<VideoMetadata>;
+  generatePreview?: (options: string | {
+    filePath: string;
+    audioStreams?: AudioStreamInfo[];
+    videoCodec?: string;
+    pixelFormat?: string;
+    duration?: number;
+  }) => Promise<{ success: boolean; previewPath: string; sampleUrl: string; isPartial?: boolean }>;
+  cancelPreview?: (filePath: string) => Promise<boolean>;
+  onPreviewCompleted?: (callback: (data: { filePath: string; previewPath: string; sampleUrl: string }) => void) => () => void;
   getChannelWaveform?: (options: {
     filePath: string;
     streamIndex: number;

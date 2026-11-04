@@ -34,7 +34,7 @@ if (resolvedFfprobePath && fs.existsSync(resolvedFfprobePath)) {
   console.warn('[FFprobe] Binário ffprobe não encontrado, tentando comando global...');
 }
 
-app.name = 'Flash Master v1.0.2';
+app.name = 'Flash Master v1.0.3';
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 
 // Previne instâncias simultâneas disputando a pasta de cache do Windows
@@ -190,7 +190,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 720,
     backgroundColor: '#0F1112',
-    title: 'Flash Master v1.0.2',
+    title: 'Flash Master v1.0.3',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -1107,3 +1107,4 @@ ipcMain.handle('ffmpeg:cancel', async () => {
   }
   return false;
 });
+
